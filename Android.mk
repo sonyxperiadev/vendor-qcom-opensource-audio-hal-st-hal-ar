@@ -6,6 +6,16 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 
+LOCAL_MODULE := libcapiv2_headers
+LOCAL_PROPRIETARY_MODULE := true
+
+LOCAL_EXPORT_C_INCLUDE_DIRS := \
+    $(LOCAL_PATH)/ext_headers
+
+include $(BUILD_HEADER_LIBRARY)
+
+include $(CLEAR_VARS)
+
 LOCAL_ARM_MODE             := arm
 LOCAL_MODULE               := sound_trigger.primary.$(TARGET_BOARD_PLATFORM)
 LOCAL_MODULE_TAGS          := optional
