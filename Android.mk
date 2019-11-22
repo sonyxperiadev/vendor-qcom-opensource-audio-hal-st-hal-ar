@@ -1,3 +1,8 @@
+ifneq ($(filter msmnile kona,$(TARGET_BOARD_PLATFORM)),)
+LOCAL_PATH := $(call my-dir)
+include $(LOCAL_PATH)/sthal-qal/Android.mk
+
+else
 ifeq ($(strip $(BOARD_SUPPORTS_OPENSOURCE_STHAL)),true)
 
 LOCAL_PATH := $(call my-dir)
@@ -121,4 +126,5 @@ include $(BUILD_SHARED_LIBRARY)
 #
 #include $(BUILD_EXECUTABLE)
 
+endif
 endif
