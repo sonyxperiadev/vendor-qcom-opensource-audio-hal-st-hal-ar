@@ -195,7 +195,7 @@ int SoundTriggerSession::OpenQALStream()
     device_ch_info->ch_map[0] = QAL_CHMAP_CHANNEL_FL;
     device_ch_info->ch_map[1] = QAL_CHMAP_CHANNEL_FR;
 
-    device.id = QAL_DEVICE_IN_HANDSET_MIC;  // To-Do: convert into QAL Device
+    device.id = QAL_DEVICE_IN_HANDSET_VA_MIC; // To-Do: convert into QAL Device
     device.config.sample_rate = 48000;
     device.config.bit_width = 16;
     device.config.ch_info = device_ch_info;
@@ -399,6 +399,10 @@ int SoundTriggerSession::UnloadSoundModel()
               __func__, status);
         goto exit;
     }
+    if (rec_config_)
+        free(rec_config_);
+    rec_config_ = nullptr;
+
     state_ = IDLE;
 
 exit:
@@ -417,14 +421,9 @@ int SoundTriggerSession::StartRecognition(
 
     ALOGV("%s: Enter, state = %d", __func__, state_);
 
-    if (state_ != IDLE && state_ != LOADED && state_ != STOPPED &&
-        !rec_config_->capture_requested) {
-        ALOGE("%s: error, invalid state %d", __func__, state_);
-        // status = -EINVAL;
-        goto exit;
-    }
+    if (rec_config_)
+        free(rec_config_); // valid due to subsequent start after a detection
 
-    // parse recognition config
     size = sizeof(struct qal_st_recognition_config) +
            config->data_size;
     rec_config_ = (struct qal_st_recognition_config *)calloc(1, size);
@@ -463,7 +462,7 @@ int SoundTriggerSession::StartRecognition(
 
     // set recognition config
     status = qal_stream_set_param(qal_handle_,
-                                  QAL_PARAM_ID_START_RECOGNITION,
+                                  QAL_PARAM_ID_RECOGNITION_CONFIG,
                                   (qal_param_payload *)rec_config_);
     if (status) {
         ALOGE("%s: error, failed to set recognition config, status = %d",
