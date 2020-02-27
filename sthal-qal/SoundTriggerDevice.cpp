@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -61,25 +61,6 @@ extern "C" const unsigned int sthal_prop_api_version =
 std::shared_ptr<SoundTriggerDevice> SoundTriggerDevice::stdev_ = nullptr;
 std::shared_ptr<sound_trigger_hw_device> SoundTriggerDevice::device_ = nullptr;
 
-// default properties which will be updated based on platform configuration
-static struct sound_trigger_properties hw_properties = {
-        "QUALCOMM Technologies, Inc",  // implementor
-        "Sound Trigger HAL",  // description
-        1,  // version
-        { 0x68ab2d40, 0xe860, 0x11e3, 0x95ef,
-         { 0x00, 0x02, 0xa5, 0xd5, 0xc5, 0x1b } },  // uuid
-        1,  // max_sound_models
-        1,  // max_key_phrases
-        1,  // max_users
-        RECOGNITION_MODE_VOICE_TRIGGER |
-        RECOGNITION_MODE_GENERIC_TRIGGER,  // recognition_modes
-        true,  // capture_transition
-        0,  // max_capture_ms
-        false,  // concurrent_capture
-        false,  // trigger_in_event
-        0  // power_consumption_mw
-};
-
 static int stdev_close(hw_device_t *device)
 {
     int status = 0;
@@ -109,35 +90,42 @@ static int stdev_get_properties(const struct sound_trigger_hw_device *dev,
 {
     int status = 0;
     std::shared_ptr<SoundTriggerDevice> st_device = nullptr;
-    struct sound_trigger_properties *hw_property = &hw_properties;
+    struct qal_st_properties *qstp = nullptr;
+    size_t size = 0;
 
     ALOGV("%s: Enter", __func__);
+
+    if (!dev || !properties) {
+        ALOGE("%s: invalid inputs", __func__);
+        return -EINVAL;
+    }
 
     st_device = SoundTriggerDevice::GetInstance(dev);
     if (!st_device) {
         ALOGE("%s: error, GetInstance failed", __func__);
-        status = -EINVAL;
+        return -EINVAL;
+    }
+
+    status =  qal_get_param(QAL_PARAM_ID_GET_SOUND_TRIGGER_PROPERTIES,
+                  (void **)&qstp, &size);
+    if (status || !qstp || size < sizeof(struct qal_st_properties)) {
+        ALOGE("%s: query properties from qal failed, status %d",
+            __func__, status);
         goto exit;
     }
 
-    hw_property->concurrent_capture = st_device->conc_capture_supported_;
-    hw_property->max_sound_models = 10;
-    hw_property->max_key_phrases = 10;
-    hw_property->max_users = 10;
-    hw_property->max_buffer_ms = 500;
+    memcpy(properties, qstp, sizeof(struct sound_trigger_properties));
 
     ALOGVV("%s version=0x%x recognition_modes=%d, capture_transition=%d, "
-           "concurrent_capture=%d", __func__, hw_property->version,
-           hw_property->recognition_modes,
-           hw_property->capture_transition,
-           hw_property->concurrent_capture);
-
-    memcpy(properties, hw_property,
-           sizeof(struct sound_trigger_properties));
+           "concurrent_capture=%d", __func__, properties->version,
+           properties->recognition_modes, properties->capture_transition,
+           properties->concurrent_capture);
 
 exit:
-    ALOGV("%s: Exit, status = %d", __func__, status);
+    if (qstp)
+        free(qstp);
 
+    ALOGV("%s: Exit, status = %d", __func__, status);
     return status;
 }
 
@@ -357,9 +345,6 @@ int SoundTriggerDevice::Init(hw_device_t **device, const hw_module_t *module)
         ALOGD("%s: returning existing stdev instance, exit", __func__);
         return status;
     }
-
-    // load hw properties
-    hw_properties_ = &hw_properties;
 
     // load audio hal
     status = LoadAudioHal();
