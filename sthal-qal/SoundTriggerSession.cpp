@@ -292,9 +292,9 @@ int SoundTriggerSession::LoadSoundModel(
 
         qal_common_sm->type = (qal_st_sound_model_type_t)common_sm->type;
         memcpy(&qal_common_sm->uuid, &common_sm->uuid,
-               sizeof(struct st_uuid_t));
+               sizeof(struct st_uuid));
         memcpy(&qal_common_sm->vendor_uuid, &common_sm->vendor_uuid,
-               sizeof(struct st_uuid_t));
+               sizeof(struct st_uuid));
         qal_common_sm->data_size = common_sm->data_size;
         qal_common_sm->data_offset = sizeof(struct qal_st_sound_model);
         memcpy((uint8_t *)qal_common_sm + qal_common_sm->data_offset,
@@ -329,10 +329,10 @@ int SoundTriggerSession::LoadSoundModel(
         qal_phrase_sm->common.type =
             (qal_st_sound_model_type_t)phrase_sm->common.type;
         memcpy(&qal_phrase_sm->common.uuid, &phrase_sm->common.uuid,
-               sizeof(struct st_uuid_t));
+               sizeof(struct st_uuid));
         memcpy(&qal_phrase_sm->common.vendor_uuid,
                &phrase_sm->common.vendor_uuid,
-               sizeof(struct st_uuid_t));
+               sizeof(struct st_uuid));
         qal_phrase_sm->common.data_size = phrase_sm->common.data_size;
         qal_phrase_sm->common.data_offset =
             sizeof(struct qal_st_phrase_sound_model);
