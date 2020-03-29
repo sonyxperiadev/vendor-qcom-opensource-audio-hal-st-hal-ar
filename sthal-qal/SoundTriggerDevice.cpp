@@ -107,7 +107,7 @@ static int stdev_get_properties(const struct sound_trigger_hw_device *dev,
     }
 
     status =  qal_get_param(QAL_PARAM_ID_GET_SOUND_TRIGGER_PROPERTIES,
-                  (void **)&qstp, &size);
+                  (void **)&qstp, &size, nullptr);
     if (status || !qstp || size < sizeof(struct qal_st_properties)) {
         ALOGE("%s: query properties from qal failed, status %d",
             __func__, status);
