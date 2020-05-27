@@ -28,7 +28,7 @@
  */
 
 #define LOG_TAG "sthal_SoundTriggerSession"
-#define ATRACE_TAG (ATRACE_TAG_AUDIO|ATRACE_TAG_HAL)
+#define ATRACE_TAG (ATRACE_TAG_AUDIO | ATRACE_TAG_HAL)
 #define LOG_NDEBUG 0
 /*#define VERY_VERY_VERBOSE_LOGGING*/
 #ifdef VERY_VERY_VERBOSE_LOGGING
@@ -40,6 +40,7 @@
 #include "SoundTriggerSession.h"
 
 #include <log/log.h>
+#include <utils/Trace.h>
 
 #include <chrono>
 #include <thread>
@@ -157,7 +158,9 @@ static int32_t qal_callback(
 
     // callback to SoundTriggerService
     session->GetRecognitionCallback(&callback);
+    ATRACE_BEGIN("sthal: client detection callback");
     callback(st_event, session->GetCookie());
+    ATRACE_END();
 
 exit:
     // release resources allocated

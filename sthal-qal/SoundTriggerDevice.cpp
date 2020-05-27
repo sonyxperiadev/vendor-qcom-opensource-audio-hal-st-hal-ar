@@ -29,7 +29,7 @@
 
 #define LOG_TAG "sthal_SoundTriggerDevice"
 
-#define ATRACE_TAG (ATRACE_TAG_AUDIO|ATRACE_TAG_HAL)
+#define ATRACE_TAG (ATRACE_TAG_AUDIO | ATRACE_TAG_HAL)
 
 #define LOG_NDEBUG 0
 /*#define VERY_VERY_VERBOSE_LOGGING*/
@@ -43,6 +43,7 @@
 
 #include <log/log.h>
 #include <cutils/atomic.h>
+#include <utils/Trace.h>
 
 #include "QalApi.h"
 
@@ -67,6 +68,7 @@ static int stdev_close(hw_device_t *device)
     std::shared_ptr<SoundTriggerDevice> st_device = nullptr;
 
     ALOGD("%s: Enter", __func__);
+    ATRACE_BEGIN("sthal: stdev_close");
 
     st_device = SoundTriggerDevice::GetInstance(device);
     if (!st_device) {
@@ -80,6 +82,7 @@ static int stdev_close(hw_device_t *device)
     }
 
 exit:
+    ATRACE_END();
     ALOGD("%s: Exit, status = %d", __func__, status);
 
     return status;
@@ -140,6 +143,7 @@ static int stdev_load_sound_model(const struct sound_trigger_hw_device *dev,
     SoundTriggerSession* st_session = nullptr;
 
     ALOGV("%s: Enter", __func__);
+    ATRACE_BEGIN("sthal: stdev_load_sound_model");
 
     st_device = SoundTriggerDevice::GetInstance(dev);
     if (!st_device) {
@@ -166,6 +170,7 @@ static int stdev_load_sound_model(const struct sound_trigger_hw_device *dev,
               __func__, status);
 
 exit:
+    ATRACE_END();
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
@@ -179,6 +184,7 @@ static int stdev_unload_sound_model(const struct sound_trigger_hw_device *dev,
     SoundTriggerSession* st_session = nullptr;
 
     ALOGV("%s: Enter", __func__);
+    ATRACE_BEGIN("sthal: stdev_unload_sound_model");
 
     st_device = SoundTriggerDevice::GetInstance(dev);
     if (!st_device) {
@@ -210,6 +216,7 @@ static int stdev_unload_sound_model(const struct sound_trigger_hw_device *dev,
     }
 
 exit:
+    ATRACE_END();
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
@@ -228,6 +235,7 @@ static int stdev_start_recognition
     SoundTriggerSession* st_session = nullptr;
 
     ALOGV("%s: Enter", __func__);
+    ATRACE_BEGIN("sthal: stdev_start_recognition");
 
     st_device = SoundTriggerDevice::GetInstance(dev);
     if (!st_device) {
@@ -252,6 +260,7 @@ static int stdev_start_recognition
     }
 
 exit:
+    ATRACE_END();
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
@@ -265,6 +274,7 @@ static int stdev_stop_recognition(const struct sound_trigger_hw_device *dev,
     SoundTriggerSession* st_session = nullptr;
 
     ALOGV("%s: Enter", __func__);
+    ATRACE_BEGIN("sthal: stdev_stop_recognition");
 
     st_device = SoundTriggerDevice::GetInstance(dev);
     if (!st_device) {
@@ -290,6 +300,7 @@ static int stdev_stop_recognition(const struct sound_trigger_hw_device *dev,
     }
 
 exit:
+    ATRACE_END();
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
@@ -509,6 +520,7 @@ static int stdev_open(const hw_module_t* module, const char* name,
     std::shared_ptr<SoundTriggerDevice> st_device = nullptr;
 
     ALOGD("%s: Enter", __func__);
+    ATRACE_BEGIN("sthal: stdev_open");
 
     if (strcmp(name, SOUND_TRIGGER_HARDWARE_INTERFACE) != 0) {
         ALOGE("%s: ERROR. wrong interface", __func__);
@@ -528,6 +540,7 @@ static int stdev_open(const hw_module_t* module, const char* name,
               __func__, status, *device);
 
 exit:
+    ATRACE_END();
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
