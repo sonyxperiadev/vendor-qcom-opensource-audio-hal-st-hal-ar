@@ -4,7 +4,7 @@
  * user session. This state machine implements logic for handling all user
  * interactions, detectinos, SSR and Audio Concurencies.
  *
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -302,6 +302,13 @@ static int merge_sound_models(struct sound_trigger_device *stdev,
         status = -EINVAL;
         goto cleanup;
     }
+    if (stdev->enable_debug_dumps) {
+        ST_DBG_DECLARE(FILE *sm_fd = NULL; static int sm_cnt = 0);
+        ST_DBG_FILE_OPEN_WR(sm_fd, ST_DEBUG_DUMP_LOCATION,
+            "st_smlib_output_merged_sm", "bin", sm_cnt++);
+        ST_DBG_FILE_WRITE(sm_fd, out_model->data, out_model->size);
+        ST_DBG_FILE_CLOSE(sm_fd);
+    }
     ALOGV("%s: Exit", __func__);
     return 0;
 
@@ -374,6 +381,13 @@ static int delete_from_merged_sound_model(struct sound_trigger_device *stdev,
         /* Used if deleting multiple keyphrases one after other */
         merge_model.data = out_model->data;
         merge_model.size = out_model->size;
+    }
+    if (stdev->enable_debug_dumps && out_model->data && out_model->size) {
+        ST_DBG_DECLARE(FILE *sm_fd = NULL; static int sm_cnt = 0);
+        ST_DBG_FILE_OPEN_WR(sm_fd, ST_DEBUG_DUMP_LOCATION,
+            "st_smlib_output_deleted_sm", "bin", sm_cnt++);
+        ST_DBG_FILE_WRITE(sm_fd, out_model->data, out_model->size);
+        ST_DBG_FILE_CLOSE(sm_fd);
     }
     return 0;
 
@@ -815,6 +829,7 @@ static int delete_sound_model(st_session_t *stc_ses)
             st_ses->sm_info.cf_levels;
         st_ses->hw_ses_current->sthw_cfg.num_conf_levels =
             st_ses->sm_info.cf_levels_size;
+        st_ses->recognition_mode = c_ses_rem->recognition_mode;
         /* Delete current client model */
         release_sound_model_info(&stc_ses->sm_info);
         stc_ses->sm_info.sm_data = NULL;
@@ -824,7 +839,7 @@ static int delete_sound_model(st_session_t *stc_ses)
     list_for_each(node, &st_ses->clients_list) {
         c_ses = node_to_item(node, st_session_t, hw_list_node);
         if ((c_ses != stc_ses) && c_ses->sm_info.sm_data) {
-            if (c_ses->recognition_mode == RECOGNITION_MODE_USER_IDENTIFICATION)
+            if (c_ses->recognition_mode & RECOGNITION_MODE_USER_IDENTIFICATION)
                 rec_mode |=  RECOGNITION_MODE_USER_IDENTIFICATION;
         }
     }
@@ -2497,6 +2512,7 @@ static int start_hw_session(st_proxy_session_t *st_ses, st_hw_session_t *hw_ses,
         hw_ses->lpi_enable = hw_ses->stdev->lpi_enable;
         hw_ses->barge_in_mode = hw_ses->stdev->barge_in_mode;
         do_unload = true;
+        platform_stdev_reset_backend_cfg(hw_ses->stdev->platform);
     }
 
     /*
@@ -2768,7 +2784,7 @@ static int get_first_stage_detection_params(st_proxy_session_t *st_ses,
     return 0;
 }
 
-static inline int prepapre_second_stage_for_client(st_session_t *stc_ses)
+static inline int prepare_second_stage_for_client(st_session_t *stc_ses)
 {
     struct listnode *node = NULL;
     st_arm_second_stage_t *st_sec_stage = NULL;
@@ -3283,13 +3299,6 @@ int process_detection_event_keyphrase_v2(
             }
         }
     } else {
-        local_event = calloc(1, sizeof(*local_event) + payload_size);
-        if (!local_event) {
-            ALOGE("%s: event allocation failed, size %zd", __func__,
-                  payload_size);
-            status = -ENOMEM;
-            goto exit;
-        }
         memcpy(local_event->phrase_extras,
             stc_ses->rc_config->phrases, stc_ses->rc_config->num_phrases *
             sizeof(struct sound_trigger_phrase_recognition_extra));
@@ -3932,6 +3941,7 @@ static void destroy_det_event_aggregator(st_proxy_session_t *st_ses)
 static int handle_load_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
 {
     st_hw_session_t *hw_ses = st_ses->hw_ses_current;
+    st_proxy_session_state_fn_t curr_state = st_ses->current_state;
     int status = 0;
 
     ALOGV("%s:[c%d-%d]", __func__, stc_ses->sm_handle, st_ses->sm_handle);
@@ -3957,6 +3967,7 @@ static int handle_load_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
         if (status)
             ALOGE("%s:[%d] stop_session failed %d", __func__, st_ses->sm_handle,
                   status);
+        STATE_TRANSITION(st_ses, loaded_state_fn);
     }
 
     status = hw_ses->fptrs->dereg_sm(hw_ses);
@@ -3991,9 +4002,9 @@ static int handle_load_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
         goto exit_1;
     }
 
-    if (st_ses->current_state == active_state_fn ||
-        st_ses->current_state == detected_state_fn ||
-        st_ses->current_state == buffering_state_fn) {
+    if (curr_state == active_state_fn ||
+        curr_state == detected_state_fn ||
+        curr_state == buffering_state_fn) {
 
         status = start_session(st_ses, hw_ses, false);
         if (status)
@@ -4025,6 +4036,7 @@ exit:
 static int handle_unload_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
 {
     st_hw_session_t *hw_ses = st_ses->hw_ses_current;
+    st_proxy_session_state_fn_t curr_state = st_ses->current_state;
     int status = 0;
 
     ALOGV("%s:[c%d-%d]", __func__, stc_ses->sm_handle, st_ses->sm_handle);
@@ -4045,6 +4057,7 @@ static int handle_unload_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
         if (status)
             ALOGE("%s:[%d] stop_session failed %d", __func__,
                 st_ses->sm_handle, status);
+        STATE_TRANSITION(st_ses, loaded_state_fn);
     }
 
     status = hw_ses->fptrs->dereg_sm(hw_ses);
@@ -4075,9 +4088,9 @@ static int handle_unload_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
         goto exit;
     }
 
-    if (st_ses->current_state == active_state_fn ||
-        st_ses->current_state == detected_state_fn ||
-        st_ses->current_state == buffering_state_fn) {
+    if (curr_state == active_state_fn ||
+        curr_state == detected_state_fn ||
+        curr_state == buffering_state_fn) {
 
         status = start_session(st_ses, hw_ses, false);
         if (status)
@@ -4788,18 +4801,34 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
                  * Note: It is possible that detection event is not sent to
                  * client if second stage is not yet detected during internal
                  * buffering stop, in which case restart is posted from second
-                 * stage thread for further detections.
+                 * stage thread for further detections. Only if the second
+                 * stage detection hasn't be started due to internal buffering
+                 * stop too early, restart session should be explictily issued.
                  */
-                if ((st_ses->current_state == buffering_state_fn) &&
-                    !stc_ses->pending_stop && stc_ses->detection_sent) {
-                    ALOGD("%s:[%d] buffering stopped internally, post c%d stop",
-                        __func__, st_ses->sm_handle,
-                        st_ses->det_stc_ses->sm_handle);
-                    status = hw_session_notifier_enqueue(stc_ses->sm_handle,
-                        ST_SES_EV_DEFERRED_STOP,
-                        ST_SES_DEFERRED_STOP_SS_DELAY_MS);
-                    if (!status)
-                        stc_ses->pending_stop = true;
+                if (st_ses->current_state == buffering_state_fn) {
+                    if (stc_ses->detection_sent) {
+                        if (!stc_ses->pending_stop) {
+                            ALOGD("%s:[%d] buffering stopped internally, post c%d stop",
+                                __func__, st_ses->sm_handle,
+                                st_ses->det_stc_ses->sm_handle);
+                            status = hw_session_notifier_enqueue(stc_ses->sm_handle,
+                                ST_SES_EV_DEFERRED_STOP,
+                                ST_SES_DEFERRED_STOP_SS_DELAY_MS);
+                            if (!status)
+                                stc_ses->pending_stop = true;
+                        }
+                    } else {
+                        list_for_each(node, &stc_ses->second_stage_list) {
+                            st_sec_stage = node_to_item(node, st_arm_second_stage_t,
+                                                        list_node);
+                            if (!st_sec_stage->ss_session->start_processing) {
+                                st_session_ev_t ev = {.ev_id = ST_SES_EV_RESTART,
+                                                      .stc_ses = stc_ses};
+                                DISPATCH_EVENT(st_ses, ev, status);
+                                break;
+                            }
+                        }
+                    }
                 }
                 pthread_mutex_unlock(&st_ses->lock);
             }
@@ -5438,7 +5467,6 @@ static int ssr_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
                 status = -EINVAL;
                 break;
             }
-            prepapre_second_stage_for_client(stc_ses);
             stc_ses->state = ST_STATE_LOADED;
         } else {
             ALOGE("%s: received unexpected event, client state = %d",
@@ -5452,7 +5480,6 @@ static int ssr_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             if (status)
                 ALOGE("%s:[c%d] update sound_model failed %d", __func__,
                     stc_ses->sm_handle, status);
-            stop_second_stage_for_client(stc_ses);
             stc_ses->state = ST_STATE_IDLE;
         } else {
             ALOGE("%s: received unexpected event, client state = %d",
@@ -5545,7 +5572,7 @@ int st_session_load_sm(st_session_t *stc_ses)
     pthread_mutex_lock(&st_ses->lock);
     DISPATCH_EVENT(st_ses, ev, status);
     if (!status) {
-        prepapre_second_stage_for_client(stc_ses);
+        prepare_second_stage_for_client(stc_ses);
         stc_ses->state = ST_STATE_LOADED;
     }
     pthread_mutex_unlock(&st_ses->lock);
