@@ -75,6 +75,7 @@ class SoundTriggerSession {
     sound_model_handle_t sm_handle_;
     qal_stream_handle_t *qal_handle_;
     recognition_callback_t rec_callback_;
+    qal_param_payload *rec_config_payload_;
     struct qal_st_recognition_config *rec_config_;
     audio_hw_call_back_t hal_callback_;
     void *cookie_;

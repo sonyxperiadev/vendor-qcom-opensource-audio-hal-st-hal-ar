@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -52,6 +52,7 @@ SoundTriggerSession::SoundTriggerSession(sound_model_handle_t handle,
 {
     state_ = IDLE;
     sm_handle_ = handle;
+    rec_config_payload_ = nullptr;
     rec_config_ = nullptr;
     hal_callback_ = callback;
 }
@@ -60,6 +61,7 @@ static int32_t qal_callback(
     qal_stream_handle_t *stream_handle,
     uint32_t event_id,
     uint32_t *event_data,
+    uint32_t event_size,
     void *cookie)
 {
     int32_t status = 0;
@@ -73,8 +75,9 @@ static int32_t qal_callback(
     struct sound_trigger_phrase_recognition_event *pharse_event = nullptr;
     struct qal_st_phrase_recognition_event *qal_pharse_event = nullptr;
 
-    ALOGD("%s: stream_handle (%p), event_id (%x), event_data (%p), cookie (%p)",
-                __func__, stream_handle, event_id, event_data, cookie);
+    ALOGD("%s: stream_handle (%p), event_id (%x), event_data (%p) event_size (%d),"
+           "cookie (%p)", __func__, stream_handle, event_id, event_data, event_size,
+           cookie);
 
     if (!stream_handle || !event_data) {
         status = -EINVAL;
@@ -177,45 +180,17 @@ int SoundTriggerSession::OpenQALStream()
 {
     int status = 0;
     struct qal_stream_attributes stream_attributes;
-    uint8_t channels = 0;
     struct qal_device device;
-    struct qal_channel_info *device_ch_info = nullptr;
-    struct qal_channel_info *stream_ch_info = nullptr;
 
     ALOGV("%s: Enter", __func__);
-
-    // allocate device channel info
-    channels = 2;
-    device_ch_info = (struct qal_channel_info *)calloc(1,
-        sizeof(struct qal_channel_info) + sizeof(uint8_t) * channels);
-    if (!device_ch_info) {
-        ALOGE("%s: Allocation failed for device channel map", __func__);
-        status = -ENOMEM;
-        goto exit;
-    }
-
-    device_ch_info->channels = channels;
-    device_ch_info->ch_map[0] = QAL_CHMAP_CHANNEL_FL;
-    device_ch_info->ch_map[1] = QAL_CHMAP_CHANNEL_FR;
 
     device.id = QAL_DEVICE_IN_HANDSET_VA_MIC; // To-Do: convert into QAL Device
     device.config.sample_rate = 48000;
     device.config.bit_width = 16;
-    device.config.ch_info = device_ch_info;
+    device.config.ch_info.channels = 2;
+    device.config.ch_info.ch_map[0] = QAL_CHMAP_CHANNEL_FL;
+    device.config.ch_info.ch_map[1] = QAL_CHMAP_CHANNEL_FR;
     device.config.aud_fmt_id = QAL_AUDIO_FMT_DEFAULT_PCM;
-
-    // allocate stream channel info
-    channels = 1;
-    stream_ch_info = (struct qal_channel_info *)calloc(1,
-        sizeof(struct qal_channel_info) + sizeof(uint8_t) * channels);
-    if (!stream_ch_info) {
-        ALOGE("%s: Allocation failed for stream channel map", __func__);
-        status = -ENOMEM;
-        goto exit;
-    }
-
-    stream_ch_info->channels = channels;
-    stream_ch_info->ch_map[0] = QAL_CHMAP_CHANNEL_FL;
 
     stream_attributes.type = QAL_STREAM_VOICE_UI;
     stream_attributes.flags = (qal_stream_flags_t)0;
@@ -223,7 +198,8 @@ int SoundTriggerSession::OpenQALStream()
     stream_attributes.in_media_config.sample_rate = 16000;
     stream_attributes.in_media_config.bit_width = 16;
     stream_attributes.in_media_config.aud_fmt_id = QAL_AUDIO_FMT_DEFAULT_PCM;
-    stream_attributes.in_media_config.ch_info = stream_ch_info;
+    stream_attributes.in_media_config.ch_info.channels = 1;
+    stream_attributes.in_media_config.ch_info.ch_map[0] = QAL_CHMAP_CHANNEL_FL;
 
     ALOGD("%s:(%x:status)%d", __func__, status, __LINE__);
     status = qal_stream_open(&stream_attributes,
@@ -244,10 +220,6 @@ int SoundTriggerSession::OpenQALStream()
     }
 
 exit:
-    if (device_ch_info)
-        free(device_ch_info);
-    if (stream_ch_info)
-        free(stream_ch_info);
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
@@ -261,6 +233,7 @@ int SoundTriggerSession::LoadSoundModel(
     struct qal_st_phrase_sound_model *qal_phrase_sm = nullptr;
     struct sound_trigger_sound_model *common_sm = nullptr;
     struct sound_trigger_phrase_sound_model *phrase_sm = nullptr;
+    qal_param_payload *param_payload = nullptr;
     unsigned int size = 0;
 
     ALOGV("%s: Enter", __func__);
@@ -286,12 +259,15 @@ int SoundTriggerSession::LoadSoundModel(
 
         size = sizeof(struct qal_st_sound_model) +
                common_sm->data_size;
-        qal_common_sm = (struct qal_st_sound_model *)calloc(1, size);
-        if (!qal_common_sm) {
+        param_payload = (qal_param_payload *)calloc(1,
+            sizeof(qal_param_payload) + size);
+        if (!param_payload) {
             ALOGE("%s: error, failed to allocate qal sound model", __func__);
             status = -ENOMEM;
             goto exit;
         }
+        param_payload->payload_size = size;
+        qal_common_sm = (struct qal_st_sound_model *)param_payload->payload;
 
         qal_common_sm->type = (qal_st_sound_model_type_t)common_sm->type;
         memcpy(&qal_common_sm->uuid, &common_sm->uuid,
@@ -320,14 +296,17 @@ int SoundTriggerSession::LoadSoundModel(
 
         size = sizeof(struct qal_st_phrase_sound_model) +
                phrase_sm->common.data_size;
-        qal_phrase_sm =
-            (struct qal_st_phrase_sound_model *)calloc(1, size);
-        if (!qal_phrase_sm) {
+        param_payload = (qal_param_payload *)calloc(1,
+            sizeof(qal_param_payload) + size);
+        if (!param_payload) {
             ALOGE("%s: error, failed to allocate qal phrase sound model",
-                  __func__);
+                __func__);
             status = -ENOMEM;
             goto exit;
         }
+        param_payload->payload_size = size;
+        qal_phrase_sm =
+            (struct qal_st_phrase_sound_model *)param_payload->payload;
 
         qal_phrase_sm->common.type =
             (qal_st_sound_model_type_t)phrase_sm->common.type;
@@ -373,7 +352,7 @@ int SoundTriggerSession::LoadSoundModel(
     // load sound model with qal api
     status = qal_stream_set_param(qal_handle_,
                                   QAL_PARAM_ID_LOAD_SOUND_MODEL,
-                                  (qal_param_payload *)qal_common_sm);
+                                  param_payload);
     if (status) {
         ALOGE("%s: error, failed to load sound model into QAL, status = %d",
               __func__, status);
@@ -383,8 +362,8 @@ int SoundTriggerSession::LoadSoundModel(
     state_ = LOADED;
 
 exit:
-    if (qal_common_sm)
-        free(qal_common_sm);
+    if (param_payload)
+        free(param_payload);
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
@@ -402,8 +381,10 @@ int SoundTriggerSession::UnloadSoundModel()
               __func__, status);
         goto exit;
     }
-    if (rec_config_)
-        free(rec_config_);
+    if (rec_config_payload_) {
+        free(rec_config_payload_);
+        rec_config_payload_ = nullptr;
+    }
     rec_config_ = nullptr;
 
     state_ = IDLE;
@@ -424,18 +405,21 @@ int SoundTriggerSession::StartRecognition(
 
     ALOGV("%s: Enter, state = %d", __func__, state_);
 
-    if (rec_config_)
-        free(rec_config_); // valid due to subsequent start after a detection
-
+    if (rec_config_payload_) {
+        free(rec_config_payload_); // valid due to subsequent start after a detection
+        rec_config_payload_ = nullptr;
+    }
     size = sizeof(struct qal_st_recognition_config) +
            config->data_size;
-    rec_config_ = (struct qal_st_recognition_config *)calloc(1, size);
-    if (!rec_config_) {
-        ALOGE("%s: error, failed to allocate qal_st_recognition_config",
-              __func__);
+    rec_config_payload_ = (qal_param_payload *)calloc(1,
+        sizeof(qal_param_payload) + size);
+    if (!rec_config_payload_) {
+        ALOGE("%s: error, failed to allocate qal recognition config", __func__);
         status = -ENOMEM;
         goto exit;
     }
+    rec_config_payload_->payload_size = size;
+    rec_config_ = (struct qal_st_recognition_config *)rec_config_payload_->payload;
 
     rec_config_->capture_handle = (int32_t)config->capture_handle;
     rec_config_->capture_device = (uint32_t)config->capture_device;
@@ -466,7 +450,7 @@ int SoundTriggerSession::StartRecognition(
     // set recognition config
     status = qal_stream_set_param(qal_handle_,
                                   QAL_PARAM_ID_RECOGNITION_CONFIG,
-                                  (qal_param_payload *)rec_config_);
+                                  rec_config_payload_);
     if (status) {
         ALOGE("%s: error, failed to set recognition config, status = %d",
               __func__, status);
@@ -489,8 +473,9 @@ int SoundTriggerSession::StartRecognition(
     RegisterHalEvent(true);
 
 exit:
-    if (status && rec_config_) {
-        free(rec_config_);
+    if (status && rec_config_payload_) {
+        free(rec_config_payload_);
+        rec_config_payload_ = nullptr;
         rec_config_ = nullptr;
     }
 
@@ -516,8 +501,10 @@ int SoundTriggerSession::StopRecognition()
         goto exit;
     }
 
-    if (rec_config_)
-        free(rec_config_);
+    if (rec_config_payload_) {
+        free(rec_config_payload_);
+        rec_config_payload_ = nullptr;
+    }
     rec_config_ = nullptr;
 
 exit:
