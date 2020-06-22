@@ -1,4 +1,4 @@
-ifneq ($(filter msmnile kona,$(TARGET_BOARD_PLATFORM)),)
+ifneq ($(filter msmnile kona lahaina,$(TARGET_BOARD_PLATFORM)),)
 LOCAL_PATH := $(call my-dir)
 include $(LOCAL_PATH)/sthal-qal/Android.mk
 
