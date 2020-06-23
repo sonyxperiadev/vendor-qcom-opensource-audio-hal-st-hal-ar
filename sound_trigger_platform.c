@@ -2,7 +2,7 @@
  *
  * This file contains the platform specific functionality.
  *
- * Copyright (c) 2013-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -187,6 +187,7 @@ typedef unsigned char __u8;
 #define ST_PARAM_KEY_SS_SM_TYPE "sm_detection_type"
 #define ST_PARAM_KEY_SS_SM_ID "sm_id"
 #define ST_PARAM_KEY_SS_LIB "module_lib"
+#define ST_PARAM_KEY_SS_DATA_BEFORE_KW_START "data_before_kw_start"
 #define ST_PARAM_KEY_SS_DATA_AFTER_KW_END "data_after_kw_end"
 
 #define ST_BACKEND_PORT_NAME_MAX_SIZE 25
@@ -742,6 +743,7 @@ static void platform_stdev_set_default_config(struct platform_data *platform)
     stdev->platform_lpi_enable = ST_PLATFORM_LPI_NONE;
     stdev->screen_off = true;
     stdev->support_dynamic_ec_update = true;
+    stdev->ec_reset_pending_cnt = 0;
 
     platform->cpe_fe_to_be_fixed = true;
     platform->bad_mic_channel_index = 0;
@@ -1677,6 +1679,14 @@ static int platform_stdev_set_ss_params
     if (err >= 0) {
         str_parms_del(parms, ST_PARAM_KEY_CHANNEL_COUNT);
         common_params->channel_count = value;
+    }
+
+    err = str_parms_get_int(parms, ST_PARAM_KEY_SS_DATA_BEFORE_KW_START, &value);
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_SS_DATA_BEFORE_KW_START);
+        common_params->data_before_kw_start = value;
+    } else {
+        common_params->data_before_kw_start = VOP_DATA_BEFORE_TRUE_KW_START_MS;
     }
 
     err = str_parms_get_int(parms, ST_PARAM_KEY_SS_DATA_AFTER_KW_END, &value);
@@ -3029,43 +3039,52 @@ static void query_stdev_platform(sound_trigger_device_t *stdev,
         strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME,
                          sizeof(MIXER_PATH_FILE_NAME));
     }
-    /* check if qrd/cdp specific mixer path file exists */
-    if (strstr(snd_card_name, "qrd")) {
-        char *tmp = NULL;
-        char *snd_internal_name = NULL;
-        char temp_path[MIXER_PATH_MAX_LENGTH];
+    /* create mixer path file name from sound card name
+    and attach cdp/qrd if sound card name has cdp/qrd */
+    char *tmp = NULL;
+    char *snd_internal_name = NULL;
+    char temp_path[MIXER_PATH_MAX_LENGTH];
 
-        strlcpy(temp_path, mixer_path_xml, MIXER_PATH_MAX_LENGTH);
+    strlcpy(temp_path, mixer_path_xml, MIXER_PATH_MAX_LENGTH);
 
-        char *snd_card_name_t = strdup(snd_card_name);
-        if (snd_card_name_t != NULL) {
-            snd_internal_name = strtok_r(snd_card_name_t, "-", &tmp);
-            while (snd_internal_name != NULL) {
-                snd_internal_name = strtok_r(NULL, "-", &tmp);
-                if ((snd_internal_name != NULL) &&
-                    strstr(snd_internal_name, "qrd"))
-                    break;
-            }
-            if (snd_internal_name != NULL) {
-                strlcat(temp_path, "_", MIXER_PATH_MAX_LENGTH);
-                strlcat(temp_path, snd_internal_name, MIXER_PATH_MAX_LENGTH);
-                strlcat(temp_path, MIXER_FILE_EXT, MIXER_PATH_MAX_LENGTH);
-                if (access(temp_path, R_OK) == 0) {
-                    strlcat(mixer_path_xml, "_", MIXER_PATH_MAX_LENGTH);
-                    strlcat(mixer_path_xml, snd_internal_name, MIXER_PATH_MAX_LENGTH);
-                }
-            }
-            free(snd_card_name_t);
+    char *snd_card_name_t = strdup(snd_card_name);
+    if (snd_card_name_t != NULL) {
+        snd_internal_name = strtok_r(snd_card_name_t, "-", &tmp);
+        while (snd_internal_name != NULL) {
+           snd_internal_name = strtok_r(NULL, "-", &tmp);
+           if (snd_internal_name != NULL) {
+               strlcat(temp_path, "_", MIXER_PATH_MAX_LENGTH);
+               strlcat(temp_path, snd_internal_name, MIXER_PATH_MAX_LENGTH);
+               strlcat(temp_path, MIXER_FILE_EXT, MIXER_PATH_MAX_LENGTH);
+               if (access(temp_path, R_OK) == 0) {
+                   strlcat(mixer_path_xml, "_", MIXER_PATH_MAX_LENGTH);
+                   strlcat(mixer_path_xml, snd_internal_name, MIXER_PATH_MAX_LENGTH);
+                   break;
+               }
+               strlcpy(temp_path, mixer_path_xml, MIXER_PATH_MAX_LENGTH);
+           }
         }
-    } else if (strstr(snd_card_name, "cdp")) {
-        char temp_path[MIXER_PATH_MAX_LENGTH];
-
         strlcpy(temp_path, mixer_path_xml, MIXER_PATH_MAX_LENGTH);
-        strlcat(temp_path, "_cdp", MIXER_PATH_MAX_LENGTH);
-        strlcat(temp_path, MIXER_FILE_EXT, MIXER_PATH_MAX_LENGTH);
-        if (access(temp_path, R_OK) == 0)
-            strlcat(mixer_path_xml, "_cdp", MIXER_PATH_MAX_LENGTH);
+        if (strstr(snd_card_name, "qrd")) {
+            strlcat(temp_path, "_qrd", MIXER_PATH_MAX_LENGTH);
+            strlcat(temp_path, MIXER_FILE_EXT, MIXER_PATH_MAX_LENGTH);
+            if (access(temp_path, R_OK) == 0)
+                strlcat(mixer_path_xml, "_qrd", MIXER_PATH_MAX_LENGTH);
+        }
+        else if (strstr(snd_card_name, "cdp")) {
+            strlcat(temp_path, "_cdp", MIXER_PATH_MAX_LENGTH);
+            strlcat(temp_path, MIXER_FILE_EXT, MIXER_PATH_MAX_LENGTH);
+            if (access(temp_path, R_OK) == 0)
+                strlcat(mixer_path_xml, "_cdp", MIXER_PATH_MAX_LENGTH);
+        }
+        free(snd_card_name_t);
     }
+    if (!strncmp(snd_card_name, "sm6150-wcd9375qrd-snd-card",
+        sizeof("sm6150-wcd9375qrd-snd-card"))) {
+        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME,
+                        sizeof(MIXER_PATH_FILE_NAME));
+    }
+
     strlcat(mixer_path_xml, MIXER_FILE_EXT, MIXER_PATH_MAX_LENGTH);
 
     /* Default sw_mad value will be overwritten if it
@@ -3125,6 +3144,194 @@ static void init_codec_backend_cfg_mixer_ctl(struct platform_data *my_data)
                 "%s TX island", my_data->backend_port);
         my_data->codec_backend_cfg.lpi_mixer_ctl = strdup(mixer_ctl);
     }
+}
+
+/* ---------------- device list APIs --------------- */
+static int list_length(struct listnode *list)
+{
+    struct listnode *node;
+    int length = 0;
+
+    if (list == NULL)
+        goto done;
+
+    for (node = list->next; node != list; node = node->next)
+        ++length;
+done:
+    return length;
+}
+
+/*
+ * Clear device list
+ * Operation: devices = {};
+ */
+static int clear_devices(struct listnode *devices)
+{
+    struct listnode *node = NULL;
+    struct audio_device_info *item = NULL;
+
+    if (devices == NULL)
+        return 0;
+
+    list_for_each (node, devices) {
+        item = node_to_item(node, struct audio_device_info, list);
+        if (item != NULL) {
+            list_remove(&item->list);
+            free(item);
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Returns true if A2DP output device is found in passed devices list
+ */
+bool platform_stdev_is_a2dp_out_device_type(struct listnode *devices)
+{
+    if (devices == NULL)
+        return false;
+
+    if (platform_stdev_compare_device_type(devices,
+            AUDIO_DEVICE_OUT_BLUETOOTH_A2DP) ||
+        platform_stdev_compare_device_type(devices,
+            AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES) ||
+        platform_stdev_compare_device_type(devices,
+            AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER))
+        return true;
+    else
+        return false;
+}
+
+/*
+ * Check if a device with given type is present in devices list
+ */
+bool platform_stdev_compare_device_type(struct listnode *devices,
+                                        audio_devices_t device_type)
+{
+    struct listnode *node = NULL;
+    struct audio_device_info *item = NULL;
+
+    if (devices == NULL)
+        return false;
+
+    list_for_each (node, devices) {
+        item = node_to_item(node, struct audio_device_info, list);
+        if (item != NULL && (item->type == device_type)) {
+            ALOGV("%s: device types %d match", __func__, device_type);
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Returns true if lists are equal in terms of device type
+ * TODO: Check if device addresses are also equal in the future
+ */
+bool platform_stdev_compare_devices(struct listnode *d1, struct listnode *d2)
+{
+    struct listnode *node = NULL;
+    struct audio_device_info *item = NULL;
+
+    if (d1 == NULL && d2 == NULL)
+        return true;
+
+    if (d1 == NULL || d2 == NULL ||
+        (list_length(d1) != list_length(d2)))
+        return false;
+
+    list_for_each (node, d1) {
+        item = node_to_item(node, struct audio_device_info, list);
+        if (item != NULL &&
+            !platform_stdev_compare_device_type(d2, item->type))
+            return false;
+    }
+    return true;
+}
+
+/*
+ * Add or remove device from list denoted by head
+ */
+int platform_stdev_update_device_list(audio_devices_t type, char* address,
+                       struct listnode *head, bool add_device)
+{
+    struct listnode *node = NULL;
+    struct audio_device_info *item = NULL;
+    struct audio_device_info *device = NULL;
+    int ret = 0;
+
+    if (head == NULL)
+        goto done;
+
+    if (type == AUDIO_DEVICE_NONE) {
+        ALOGE("%s: Invalid device: %#x", __func__, type);
+        ret = -EINVAL;
+        goto done;
+    }
+
+    list_for_each (node, head) {
+        item = node_to_item(node, struct audio_device_info, list);
+        if (item != NULL && (item->type == type)) {
+            device = item;
+            break;
+        }
+    }
+
+    if (add_device) {
+        if (device == NULL) {
+            device = (struct audio_device_info *)
+                        calloc (1, sizeof(struct audio_device_info));
+            if (!device) {
+                ALOGE("%s: Cannot allocate memory for device_info", __func__);
+                ret = -ENOMEM;
+                goto done;
+            }
+            device->type = type;
+            list_add_tail(head, &device->list);
+        }
+        /*
+         * TODO: Use address in future if required. Currently NULL string used.
+         */
+        strlcpy(device->address, address, AUDIO_DEVICE_MAX_ADDRESS_LEN);
+        ALOGV("%s: Added device type %#x, address %s", __func__, type,
+            address);
+    } else {
+        if (device != NULL) {
+            list_remove(&device->list);
+            free(device);
+            ALOGV("%s: Removed device type %#x, address %s", __func__, type,
+                address);
+        }
+    }
+done:
+    return ret;
+}
+
+/*
+ * Assign source device list to destination device list
+ * Operation: dest list = source list
+ */
+int platform_stdev_assign_devices(struct listnode *dest,
+                                  const struct listnode *source)
+{
+    struct listnode *node;
+    struct audio_device_info *item = NULL;
+    int ret = 0;
+
+    if (source == NULL || dest == NULL)
+        return ret;
+
+    if (!list_empty(dest))
+        clear_devices(dest);
+
+    list_for_each (node, source) {
+        item = node_to_item(node, struct audio_device_info, list);
+        if (item != NULL)
+            ret = platform_stdev_update_device_list(item->type, item->address,
+                dest, true);
+    }
+    return ret;
 }
 
 #if (SNDRV_LSM_VERSION >= SNDRV_PROTOCOL_VERSION(0, 3, 0))
@@ -3306,7 +3513,7 @@ static int platform_stdev_get_device_sample_rate
     struct listnode *p_node, *temp_node;
     struct adm_cfg_info *cfg_info;;
     /* default device sampling rate in acdb */
-    int sample_rate = SOUND_TRIGGER_SAMPLING_RATE_48000;
+    int sample_rate = SOUND_TRIGGER_SAMPLING_RATE_16000;
 
     list_for_each_safe(p_node, temp_node, &stdev->adm_cfg_list) {
         cfg_info = node_to_item(p_node, struct adm_cfg_info, list_node);
@@ -3609,12 +3816,14 @@ void *platform_stdev_init(sound_trigger_device_t *stdev)
         ret = my_data->audio_hw_acdb_init_v2(stdev->mixer);
         if (ret) {
             ALOGE("%s: ERROR. audio_hw_acdb_init_v2 failed status %d", __func__, ret);
+            my_data->acdb_deinit();
             goto cleanup;
         }
     } else if (my_data->audio_hw_acdb_init) {
             ret = my_data->audio_hw_acdb_init(snd_card_num);
             if (ret) {
                 ALOGE("%s: ERROR. audio_hw_acdb_init failed status %d", __func__, ret);
+                my_data->acdb_deinit();
                 goto cleanup;
             }
     } else {
@@ -3978,7 +4187,7 @@ static int get_st_device
     case AUDIO_DEVICE_IN_WIRED_HEADSET:
         if ((ST_EXEC_MODE_CPE == exec_mode) ||
             (ST_EXEC_MODE_ADSP == exec_mode)) {
-            if (my_data->codec_backend_cfg.lpi_enable)
+            if (my_data->stdev->lpi_enable)
                 st_device = ST_DEVICE_HEADSET_MIC_LPI;
             else
                 st_device = ST_DEVICE_HEADSET_MIC;
@@ -4046,10 +4255,10 @@ static int get_st_device
                 else
                     st_device = ST_DEVICE_HANDSET_DMIC;
             } else if (channel_count == SOUND_TRIGGER_CHANNEL_MODE_MONO) {
-                if (v_info->profile_type != ST_PROFILE_TYPE_NONE)
-                    st_device = ST_DEVICE_HANDSET_MIC_PP;
-                else
+                if (my_data->stdev->lpi_enable)
                     st_device = ST_DEVICE_HANDSET_MIC;
+                else
+                    st_device = ST_DEVICE_HANDSET_MIC_PP;
             } else {
                 ALOGE("%s: Invalid channel count %d", __func__, channel_count);
             }
@@ -4085,35 +4294,24 @@ audio_devices_t platform_stdev_get_capture_device
     struct platform_data *my_data = (struct platform_data *)platform;
     sound_trigger_device_t *stdev = my_data->stdev;
     audio_devices_t device = AUDIO_DEVICE_NONE;
-    audio_devices_t avail_devices = stdev->available_devices &
-                                     ~AUDIO_DEVICE_BIT_IN;
+    struct audio_device_info *item = NULL;
+    struct listnode *node = NULL;
 
-    if (avail_devices & AUDIO_DEVICE_IN_WIRED_HEADSET)
+    if (platform_stdev_compare_device_type(&stdev->available_devices,
+        AUDIO_DEVICE_IN_WIRED_HEADSET)) {
         device = AUDIO_DEVICE_IN_WIRED_HEADSET;
-    else if (avail_devices & AUDIO_DEVICE_IN_BUILTIN_MIC)
+    } else if (platform_stdev_compare_device_type(&stdev->available_devices,
+        AUDIO_DEVICE_IN_BUILTIN_MIC)) {
         device = AUDIO_DEVICE_IN_BUILTIN_MIC;
+    }
 
-    ALOGD("%s: available devices 0x%x, device 0x%x", __func__,
-                         stdev->available_devices, device);
+    ALOGD("%s: Device = 0x%x", __func__, device);
+    list_for_each (node, &stdev->available_devices) {
+        item = node_to_item(node, struct audio_device_info, list);
+        ALOGD("%s: Available device = 0x%x", __func__, item->type);
+    }
+
     return device;
-}
-
-int platform_stdev_update_avail_device
-(
-    void *platform,
-    audio_devices_t device,
-    bool connect
-)
-{
-    struct platform_data *my_data = (struct platform_data *)platform;
-    sound_trigger_device_t *stdev = my_data->stdev;
-
-    if (connect)
-        stdev->available_devices |= device;
-    else
-        stdev->available_devices &= ~device;
-
-    return 0;
 }
 
 static int get_backend_index_from_name
@@ -5330,7 +5528,7 @@ int platform_stdev_send_stream_app_type_cfg
     bool found_profile = false;
     int st_device_be_idx = -EINVAL;
 
-    if (profile_type == ST_PROFILE_TYPE_NONE) {
+    if (!stdev->lpi_enable && (profile_type == ST_PROFILE_TYPE_NONE)) {
         ALOGV("%s: Profile set to None, ignore sending app type cfg",__func__);
         goto exit;
     }
@@ -5364,16 +5562,31 @@ int platform_stdev_send_stream_app_type_cfg
         goto exit;
     }
 
-    list_for_each_safe(p_node, temp_node, &stdev->adm_cfg_list) {
-        cfg_info = node_to_item(p_node, struct adm_cfg_info, list_node);
-        if (cfg_info->profile_type == profile_type) {
-            found_profile = true;
-            app_type_cfg[len++] = cfg_info->app_type;
-            app_type_cfg[len++] = acdb_id;
-            app_type_cfg[len++] = cfg_info->sample_rate;
-            if (st_device_be_idx >= 0)
-                app_type_cfg[len++] = st_device_be_idx;
-            break;
+    if (stdev->lpi_enable) {
+        /*
+         * Though app_type_cfg is for ADM connection, driver needs atleast LPI
+         * acdb id  to avoid sending a cached non-lpi acdb stale topology of any
+         * concurrent audio use case for SVA LPI use case.
+         */
+        ALOGD("%s: send Stream App Type Cfg for LPI",__func__);
+        found_profile = true;
+        app_type_cfg[len++] = 0;
+        app_type_cfg[len++] = acdb_id;
+        app_type_cfg[len++] = SOUND_TRIGGER_SAMPLING_RATE_16000;
+        if (st_device_be_idx >= 0)
+            app_type_cfg[len++] = st_device_be_idx;
+    } else {
+        list_for_each_safe(p_node, temp_node, &stdev->adm_cfg_list) {
+            cfg_info = node_to_item(p_node, struct adm_cfg_info, list_node);
+            if (cfg_info->profile_type == profile_type) {
+                found_profile = true;
+                app_type_cfg[len++] = cfg_info->app_type;
+                app_type_cfg[len++] = acdb_id;
+                app_type_cfg[len++] = cfg_info->sample_rate;
+                if (st_device_be_idx >= 0)
+                    app_type_cfg[len++] = st_device_be_idx;
+                break;
+            }
         }
     }
 
@@ -5414,19 +5627,23 @@ int platform_stdev_get_device_app_type
 static void check_and_append_ec_ref_device_name
 (
     void *platform,
-    char *ec_ref_mixer_path,
-    audio_devices_t rx_device
+    char *ec_ref_mixer_path
 )
 {
     audio_devices_t capture_device = 0;
+    struct platform_data *my_data = (struct platform_data *)platform;
 
     capture_device = platform_stdev_get_capture_device(platform);
-    if (capture_device == AUDIO_DEVICE_IN_WIRED_HEADSET)
+    if (capture_device == AUDIO_DEVICE_IN_WIRED_HEADSET) {
         strlcat(ec_ref_mixer_path, " headset",  DEVICE_NAME_MAX_SIZE);
-    else if (rx_device & AUDIO_DEVICE_OUT_ALL_A2DP)
+    } else if (platform_stdev_is_a2dp_out_device_type(
+                   &my_data->stdev->active_rx_dev_list)) {
         strlcat(ec_ref_mixer_path, " a2dp",  DEVICE_NAME_MAX_SIZE);
-    else if (rx_device & AUDIO_DEVICE_OUT_LINE)
+    } else if (platform_stdev_compare_device_type(
+                   &my_data->stdev->active_rx_dev_list,
+                   AUDIO_DEVICE_OUT_LINE)) {
         strlcat(ec_ref_mixer_path, " line",  DEVICE_NAME_MAX_SIZE);
+    }
 }
 
 int platform_stdev_update_ec_effect
@@ -5474,14 +5691,19 @@ void platform_stdev_send_ec_ref_cfg
 
     if (is_ec_profile(profile_type)) {
         event_info.st_ec_ref_enabled = enable;
+        // reset the pending active EC mixer ctls first
+        if (!stdev->audio_ec_enabled && stdev->ec_reset_pending_cnt > 0) {
+            while (stdev->ec_reset_pending_cnt--)
+                audio_route_reset_and_update_path(stdev->audio_route,
+                        my_data->ec_ref_mixer_path);
+        }
         if (enable) {
             stdev->audio_hal_cb(ST_EVENT_UPDATE_ECHO_REF, &event_info);
             strlcpy(my_data->ec_ref_mixer_path, "echo-reference",
                     sizeof(my_data->ec_ref_mixer_path));
 
             check_and_append_ec_ref_device_name(platform,
-                                                my_data->ec_ref_mixer_path,
-                                                stdev->active_rx_dev);
+                                                my_data->ec_ref_mixer_path);
 
             audio_route_apply_and_update_path(stdev->audio_route,
                     my_data->ec_ref_mixer_path);
@@ -5495,6 +5717,7 @@ void platform_stdev_send_ec_ref_cfg
                 audio_route_reset_and_update_path(stdev->audio_route,
                         my_data->ec_ref_mixer_path);
             } else {
+                stdev->ec_reset_pending_cnt++;
                 ALOGD("%s: audio hal has already enabled EC", __func__);
             }
         }
@@ -5730,12 +5953,13 @@ bool platform_stdev_check_backends_match
 
 void platform_stdev_check_and_append_usecase
 (
-   void *platform __unused,
-   char *use_case,
-   st_profile_type_t profile_type
+   void *platform,
+   char *use_case
 )
 {
-    if (profile_type != ST_PROFILE_TYPE_NONE)
+    struct platform_data *my_data = (struct platform_data *)platform;
+
+    if (!my_data->stdev->lpi_enable)
         strlcat(use_case, " preproc", USECASE_STRING_SIZE);
 
     ALOGV("%s: return usecase %s", __func__, use_case);
