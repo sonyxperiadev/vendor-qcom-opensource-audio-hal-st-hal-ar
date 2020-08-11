@@ -210,11 +210,95 @@ void hw_sess_cb(st_hw_sess_event_t *hw_event, void *cookie)
         break;
     }
 
+    case ST_HW_SESS_EVENT_BUFFERING_STOPPED:
+    {
+        st_session_ev_t ev;
+        ev.ev_id = ST_SES_EV_DEFERRED_STOP;
+        ev.stc_ses = st_ses->det_stc_ses;
+
+        /*
+         * If detection is sent to client while in buffering state,
+         * and if internal buffering is stopped due to errors, stop
+         * session internally as client is expected to restart the
+         * detection if required.
+         * Note: It is possible that detection event is not sent to
+         * client if second stage is not yet detected during internal
+         * buffering stop, in which case restart is posted from second
+         * stage thread for further detections. Only if the second
+         * stage detection hasn't be started due to internal buffering
+         * stop too early, restart session should be explictily issued.
+         */
+
+        do {
+            lock_status = pthread_mutex_trylock(&st_ses->lock);
+        } while (lock_status && !st_ses->det_stc_ses->pending_stop &&
+                 (st_ses->current_state == buffering_state_fn) &&
+                 !st_ses->stdev->ssr_offline_received);
+
+        if (st_ses->det_stc_ses->pending_stop)
+            ALOGV("%s:[%d] pending stop already queued, ignore event",
+                __func__, st_ses->sm_handle);
+        else if (!st_ses->det_stc_ses->detection_sent)
+            ALOGV("%s:[%d] client callback hasn't been called, ignore event",
+                __func__, st_ses->sm_handle);
+        else if (st_ses->current_state != buffering_state_fn)
+            ALOGV("%s:[%d] session already stopped buffering, ignore event",
+                __func__, st_ses->sm_handle);
+        else if (st_ses->stdev->ssr_offline_received)
+            ALOGV("%s:[%d] SSR handling in progress, ignore event",
+                  __func__, st_ses->sm_handle);
+        else if (!lock_status)
+            DISPATCH_EVENT(st_ses, ev, status);
+
+        if (!lock_status)
+            pthread_mutex_unlock(&st_ses->lock);
+        break;
+    }
+
     default:
         ALOGD("%s:[%d] unhandled event", __func__, st_ses->sm_handle);
         break;
     };
+}
 
+static inline struct st_proxy_ses_sm_info_wrapper *get_sm_info_for_model_id
+(
+    st_proxy_session_t *st_ses,
+    uint32_t model_id
+)
+{
+    struct listnode *node = NULL;
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
+
+    list_for_each(node, &st_ses->sm_info_list) {
+        p_info = node_to_item(node, struct st_proxy_ses_sm_info_wrapper,
+            sm_list_node);
+
+        if (p_info->sm_info.model_id == model_id)
+            return p_info;
+    }
+
+    return NULL;
+}
+
+static inline struct st_hw_ses_config *get_sthw_cfg_for_model_id
+(
+    st_hw_session_t *hw_ses,
+    uint32_t model_id
+)
+{
+    struct listnode *node = NULL;
+    struct st_hw_ses_config *sthw_cfg = NULL;
+
+    list_for_each(node, &hw_ses->sthw_cfg_list) {
+        sthw_cfg = node_to_item(node, struct st_hw_ses_config,
+            sthw_cfg_list_node);
+
+        if (sthw_cfg->model_id == model_id)
+            return sthw_cfg;
+    }
+
+    return NULL;
 }
 
 static inline void free_array_ptrs(char **arr, unsigned int arr_len)
@@ -627,7 +711,8 @@ static int add_sound_model(st_session_t *stc_ses, unsigned char *sm_data,
     st_session_t *c_ses = NULL;
     listen_model_type **in_models = NULL;
     listen_model_type out_model = {0};
-    struct sound_model_info sm_info = {0};
+    struct sound_model_info sm_info =  {0};
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
     int status = 0, num_models = 0;
 
     ALOGV("%s:[c%d]", __func__, stc_ses->sm_handle);
@@ -635,13 +720,46 @@ static int add_sound_model(st_session_t *stc_ses, unsigned char *sm_data,
         ALOGD("%s:[c%d] Already added", __func__, stc_ses->sm_handle);
         return 0;
     }
-    if (!st_ses->vendor_uuid_info->merge_fs_soundmodels) {
+    if (!st_ses->vendor_uuid_info->merge_fs_soundmodels ||
+        stc_ses->f_stage_version == ST_MODULE_TYPE_PDK5) {
         stc_ses->sm_info.sm_data = sm_data;
         stc_ses->sm_info.sm_size = sm_size;
-        st_ses->sm_info.sm_data = sm_data;
-        st_ses->sm_info.sm_size = sm_size;
-        st_ses->sm_info.sm_type = stc_ses->sm_type;
-        ALOGD("%s:[c%d] no merge", __func__, stc_ses->sm_handle);
+        stc_ses->sm_info.sm_type = stc_ses->sm_type;
+        stc_ses->sm_info.model_id =
+            (stc_ses->f_stage_version == ST_MODULE_TYPE_PDK5) ?
+            stc_ses->sm_handle : 0;
+
+        p_info = calloc(1, sizeof(struct st_proxy_ses_sm_info_wrapper));
+        if (!p_info) {
+            ALOGE("%s: failed to alloc struct st_proxy_ses_sm_info_wrapper",
+                __func__);
+            return -ENOMEM;
+        }
+
+        memcpy((uint8_t *)&p_info->sm_info, (uint8_t *)&stc_ses->sm_info,
+            sizeof(struct sound_model_info));
+
+        if (stc_ses->f_stage_version == ST_MODULE_TYPE_PDK5) {
+            st_ses->recognition_mode |= stc_ses->recognition_mode;
+            p_info->sm_info.cf_levels = calloc(1, 2 * MAX_MULTI_SM_CONF_LEVELS);
+            if (!p_info->sm_info.cf_levels) {
+                ALOGE("%s: failed to alloc cf_levels",
+                    __func__);
+                free(p_info);
+                return -ENOMEM;
+            }
+            memset(p_info->sm_info.cf_levels, MAX_CONF_LEVEL_VALUE,
+                MAX_MULTI_SM_CONF_LEVELS);
+            p_info->sm_info.det_cf_levels = p_info->sm_info.cf_levels +
+                MAX_MULTI_SM_CONF_LEVELS;
+            memset(p_info->sm_info.det_cf_levels, 0,
+                MAX_MULTI_SM_CONF_LEVELS);
+            stc_ses->sm_info.cf_levels = p_info->sm_info.cf_levels;
+            stc_ses->sm_info.det_cf_levels = p_info->sm_info.det_cf_levels;
+        }
+        list_add_tail(&st_ses->sm_info_list, &p_info->sm_list_node);
+        if (stc_ses->f_stage_version == ST_MODULE_TYPE_GMM)
+            ALOGD("%s:[c%d] no merge", __func__, stc_ses->sm_handle);
         return 0;
     }
     /* get sound model header information for client model */
@@ -663,15 +781,20 @@ static int add_sound_model(st_session_t *stc_ses, unsigned char *sm_data,
             num_models++;
     }
     if (!num_models) {
-        if (st_ses->sm_info.sm_merged && st_ses->sm_info.sm_data) {
-            free(st_ses->sm_info.sm_data);
+        p_info = calloc(1, sizeof(struct st_proxy_ses_sm_info_wrapper));
+        if (!p_info) {
+            ALOGE("%s: failed to alloc struct st_proxy_ses_sm_info_wrapper",
+                __func__);
+            return -ENOMEM;
         }
-        /* Only one current client model, just re-use it */
         st_ses->recognition_mode = stc_ses->recognition_mode;
         stc_ses->sm_info.sm_type = stc_ses->sm_type;
-        st_ses->sm_info = stc_ses->sm_info;
-        st_ses->sm_info.sm_merged = false;
-        ALOGD("%s: re-use single client c%d model, size %d", __func__,
+        stc_ses->sm_info.model_id = 0;
+        memcpy((uint8_t *)&p_info->sm_info, (uint8_t *)&stc_ses->sm_info,
+            sizeof(struct sound_model_info));
+        st_ses->sm_merged = false;
+        list_add_tail(&st_ses->sm_info_list, &p_info->sm_list_node);
+        ALOGD("%s: Copy from single client c%d model, size %d", __func__,
               stc_ses->sm_handle, stc_ses->sm_info.sm_size);
         return 0;
     }
@@ -680,19 +803,27 @@ static int add_sound_model(st_session_t *stc_ses, unsigned char *sm_data,
      * Merge this client model with already existing merged model due to other
      * clients models.
      */
-    if (!st_ses->sm_info.sm_data) {
+    p_info = get_sm_info_for_model_id(st_ses, 0);
+    if (!p_info) {
+        ALOGE("%s: Unexpected, no matching model_id in sm_info list,"
+              "num current models %d", __func__, num_models);
+        status = -EINVAL;
+        goto cleanup;
+    }
+
+    if (!p_info->sm_info.sm_data) {
         if (num_models == 1) {
             /*
-             * Its not a merged model yet, but proxy ses sm_data is valid and
-             * must be pointing to client sm_data
+             * Its not a merged model yet, but proxy ses sm_data is valid
+             * and must be pointing to client sm_data
              */
-            ALOGE("%s: Unexpected, sm_info.sm_data NULL, num current"
+            ALOGE("%s: Unexpected, sm_data NULL, num current"
                   "models %d", __func__, num_models);
             status = -EINVAL;
             goto cleanup;
-        } else if (!st_ses->sm_info.sm_merged) {
-            ALOGE("%s: Unexpected, no pre-existing merged model, num current"
-                  "models %d", __func__, num_models);
+        } else if (!st_ses->sm_merged) {
+            ALOGE("%s: Unexpected, no pre-existing merged model,"
+                  "num current models %d", __func__, num_models);
             status = -EINVAL;
             goto cleanup;
         }
@@ -707,8 +838,8 @@ static int add_sound_model(st_session_t *stc_ses, unsigned char *sm_data,
         goto cleanup;
     }
     /* Add existing model */
-    in_models[0]->data = st_ses->sm_info.sm_data;
-    in_models[0]->size = st_ses->sm_info.sm_size;
+    in_models[0]->data = p_info->sm_info.sm_data;
+    in_models[0]->size = p_info->sm_info.sm_size;
     /* Add this client model */
     in_models[1]->data = sm_data;
     in_models[1]->size = sm_size;
@@ -719,16 +850,16 @@ static int add_sound_model(st_session_t *stc_ses, unsigned char *sm_data,
 
     sm_info.sm_data = out_model.data;
     sm_info.sm_size = out_model.size;
-    sm_info.sm_merged = true;
+    sm_info.model_id = 0;
 
     status = query_sound_model(st_ses->stdev, &sm_info,
                                out_model.data, out_model.size);
     if (status)
         goto cleanup;
 
-    if (out_model.size < st_ses->sm_info.sm_size) {
+    if (out_model.size < p_info->sm_info.sm_size) {
         ALOGE("%s: Unexpected, merged model sz %d < current sz %d",
-            __func__, out_model.size, st_ses->sm_info.sm_size);
+            __func__, out_model.size, p_info->sm_info.sm_size);
         release_sound_model_info(&sm_info);
         status = -EINVAL;
         goto cleanup;
@@ -737,13 +868,15 @@ static int add_sound_model(st_session_t *stc_ses, unsigned char *sm_data,
     in_models = NULL;
 
     /* Update the new merged model */
-    if (st_ses->sm_info.sm_merged && st_ses->sm_info.sm_data) {
-        release_sound_model_info(&st_ses->sm_info);
-        free(st_ses->sm_info.sm_data);
+    if (st_ses->sm_merged && p_info->sm_info.sm_data) {
+        release_sound_model_info(&p_info->sm_info);
+        free(p_info->sm_info.sm_data);
     }
     ALOGD("%s: Updated sound model: current size %d, new size %d", __func__,
-        st_ses->sm_info.sm_size, out_model.size);
-    st_ses->sm_info = sm_info;
+        p_info->sm_info.sm_size, out_model.size);
+    memcpy((uint8_t *)&p_info->sm_info, (uint8_t *)&sm_info,
+        sizeof(struct sound_model_info));
+    st_ses->sm_merged = true;
 
     /*
      * If any of the clients has user identificaiton enabled, underlying
@@ -775,6 +908,8 @@ static int delete_sound_model(st_session_t *stc_ses)
     listen_model_type in_model = {0};
     listen_model_type out_model = {0};
     struct sound_model_info sm_info = {0};
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
+    struct st_hw_ses_config *sthw_cfg = NULL;
     int status = 0, num_models = 0;
     unsigned int rec_mode = RECOGNITION_MODE_VOICE_TRIGGER;
 
@@ -783,14 +918,42 @@ static int delete_sound_model(st_session_t *stc_ses)
         ALOGD("%s:[c%d] Already deleted", __func__, stc_ses->sm_handle);
         return 0;
     }
-    if (!st_ses->vendor_uuid_info->merge_fs_soundmodels) {
+
+    p_info = get_sm_info_for_model_id(st_ses, stc_ses->sm_info.model_id);
+    if (!p_info) {
+        ALOGE("%s: Unexpected, no matching sm_info" , __func__);
+        return -EINVAL;
+    }
+
+    if (!st_ses->vendor_uuid_info->merge_fs_soundmodels ||
+        stc_ses->f_stage_version == ST_MODULE_TYPE_PDK5) {
+        list_remove(&p_info->sm_list_node);
         /*
-         * As it directly points to client model, just set as NULL
-         * without freeing
+         * As it directly points to client model, just set sm_data
+         * as NULL without freeing
          */
-        st_ses->sm_info.sm_data = NULL;
+        if (stc_ses->f_stage_version == ST_MODULE_TYPE_PDK5) {
+            /* Update overall recogniton mode from remaining clients */
+            list_for_each(node, &st_ses->clients_list) {
+                c_ses = node_to_item(node, st_session_t, hw_list_node);
+                if ((c_ses != stc_ses) && c_ses->sm_info.sm_data) {
+                    if (c_ses->recognition_mode &
+                        RECOGNITION_MODE_USER_IDENTIFICATION)
+                        rec_mode |=  RECOGNITION_MODE_USER_IDENTIFICATION;
+                }
+            }
+            st_ses->recognition_mode = rec_mode;
+
+            if (p_info->sm_info.cf_levels) {
+                free(p_info->sm_info.cf_levels);
+                p_info->sm_info.cf_levels = NULL;
+            }
+        }
+        p_info->sm_info.sm_data = NULL;
+        free(p_info);
         stc_ses->sm_info.sm_data = NULL;
-        ALOGD("%s:[c%d] no merge", __func__, stc_ses->sm_handle);
+        if (stc_ses->f_stage_version == ST_MODULE_TYPE_GMM)
+            ALOGD("%s:[c%d] no merge", __func__, stc_ses->sm_handle);
         return 0;
     }
 
@@ -806,10 +969,14 @@ static int delete_sound_model(st_session_t *stc_ses)
             num_models++;
         }
     }
+
     if (num_models == 0) {
         ALOGD("%s: No remaining models", __func__);
         /* Delete current client model */
-        release_sound_model_info(&stc_ses->sm_info);
+        release_sound_model_info(&p_info->sm_info);
+        list_remove(&p_info->sm_list_node);
+        p_info->sm_info.sm_data = NULL;
+        free(p_info);
         stc_ses->sm_info.sm_data = NULL;
         return 0;
     }
@@ -818,17 +985,24 @@ static int delete_sound_model(st_session_t *stc_ses)
         ALOGD("%s: reuse only remaining client model, size %d", __func__,
             c_ses_rem->sm_info.sm_size);
         /* If only one remaining client model exists, re-use it */
-        if (st_ses->sm_info.sm_merged) {
-            release_sound_model_info(&st_ses->sm_info);
-            if (st_ses->sm_info.sm_data)
-                free(st_ses->sm_info.sm_data);
+        if (st_ses->sm_merged) {
+            release_sound_model_info(&p_info->sm_info);
+            if (p_info->sm_info.sm_data)
+                free(p_info->sm_info.sm_data);
         }
-        st_ses->sm_info = c_ses_rem->sm_info;
-        st_ses->sm_info.sm_merged = false;
-        st_ses->hw_ses_current->sthw_cfg.conf_levels =
-            st_ses->sm_info.cf_levels;
-        st_ses->hw_ses_current->sthw_cfg.num_conf_levels =
-            st_ses->sm_info.cf_levels_size;
+        memcpy((uint8_t *)&p_info->sm_info, (uint8_t *)&c_ses_rem->sm_info,
+            sizeof(struct sound_model_info));
+        st_ses->sm_merged = false;
+
+        sthw_cfg = get_sthw_cfg_for_model_id(st_ses->hw_ses_current, 0);
+        if (!sthw_cfg) {
+            ALOGE("%s: Unexpected, no matching sthw_cfg", __func__);
+            return -EINVAL;
+        }
+
+        sthw_cfg->conf_levels = p_info->sm_info.cf_levels;
+        sthw_cfg->num_conf_levels =
+            p_info->sm_info.cf_levels_size;
         st_ses->recognition_mode = c_ses_rem->recognition_mode;
         /* Delete current client model */
         release_sound_model_info(&stc_ses->sm_info);
@@ -848,15 +1022,15 @@ static int delete_sound_model(st_session_t *stc_ses)
      * Delete this client model with already existing merged model due to other
      * clients models.
      */
-    if (!st_ses->sm_info.sm_merged || !st_ses->sm_info.sm_data) {
+    if (!st_ses->sm_merged || !p_info->sm_info.sm_data) {
         ALOGE("%s: Unexpected, no pre-existing merged model to delete from,"
               "num current models %d", __func__, num_models);
         goto cleanup;
     }
 
     /* Existing merged model from which the current client model to be deleted */
-    in_model.data = st_ses->sm_info.sm_data;
-    in_model.size = st_ses->sm_info.sm_size;
+    in_model.data = p_info->sm_info.sm_data;
+    in_model.size = p_info->sm_info.sm_size;
 
     status = delete_from_merged_sound_model(st_ses->stdev,
         stc_ses->sm_info.keyphrases, stc_ses->sm_info.num_keyphrases,
@@ -867,7 +1041,7 @@ static int delete_sound_model(st_session_t *stc_ses)
 
     sm_info.sm_data = out_model.data;
     sm_info.sm_size = out_model.size;
-    sm_info.sm_merged = true;
+    sm_info.model_id = 0;
 
     /* Update existing merged model info with new merged model */
     status = query_sound_model(st_ses->stdev, &sm_info, out_model.data,
@@ -875,22 +1049,24 @@ static int delete_sound_model(st_session_t *stc_ses)
     if (status)
         goto cleanup;
 
-    if (out_model.size > st_ses->sm_info.sm_size) {
+    if (out_model.size > p_info->sm_info.sm_size) {
         ALOGE("%s: Unexpected, merged model sz %d > current sz %d",
-            __func__, out_model.size, st_ses->sm_info.sm_size);
+            __func__, out_model.size, p_info->sm_info.sm_size);
         release_sound_model_info(&sm_info);
         status = -EINVAL;
         goto cleanup;
     }
 
-    if (st_ses->sm_info.sm_merged && st_ses->sm_info.sm_data) {
-        release_sound_model_info(&st_ses->sm_info);
-        free(st_ses->sm_info.sm_data);
+    if (st_ses->sm_merged && p_info->sm_info.sm_data) {
+        release_sound_model_info(&p_info->sm_info);
+        free(p_info->sm_info.sm_data);
     }
 
     ALOGD("%s: Updated sound model: current size %d, new size %d", __func__,
-        st_ses->sm_info.sm_size, out_model.size);
-    st_ses->sm_info = sm_info;
+        p_info->sm_info.sm_size, out_model.size);
+    memcpy((uint8_t *)&p_info->sm_info, (uint8_t *)&sm_info,
+        sizeof(struct sound_model_info));
+    st_ses->sm_merged = true;
     /*
      * If any of the remaining clients has user identificaiton enabled,
      * underlying hw session has to operate with user identificaiton enabled.
@@ -949,19 +1125,26 @@ static int update_merge_conf_levels_payload(st_proxy_session_t *st_ses,
     unsigned int src_size, bool set)
 {
     int i = 0, j = 0;
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
 
     if (!st_ses || !src) {
         ALOGE("%s: NULL pointer", __func__);
         return -EINVAL;
     }
 
-    if (!st_ses->sm_info.sm_merged)
+    if (!st_ses->sm_merged)
         return 0;
 
-    if (src_size > st_ses->sm_info.cf_levels_size) {
+    p_info = get_sm_info_for_model_id(st_ses, 0);
+    if (!p_info) {
+        ALOGE("%s: Unexpected, no matching sm_info" , __func__);
+        return -EINVAL;
+    }
+
+    if (src_size > p_info->sm_info.cf_levels_size) {
         ALOGE("%s:[%d] Unexpected, client conf levels %d > "
             "merged conf levels %d", __func__, st_ses->sm_handle,
-            src_size, st_ses->sm_info.cf_levels_size);
+            src_size, p_info->sm_info.cf_levels_size);
         return -EINVAL;
     }
 
@@ -970,17 +1153,17 @@ static int update_merge_conf_levels_payload(st_proxy_session_t *st_ses,
 
     /* Populate DSP merged sound model conf levels */
     for (i = 0; i < src_size; i++) {
-        for (j = 0; j < st_ses->sm_info.cf_levels_size; j++) {
-            if (!strcmp(st_ses->sm_info.cf_levels_kw_users[j],
+        for (j = 0; j < p_info->sm_info.cf_levels_size; j++) {
+            if (!strcmp(p_info->sm_info.cf_levels_kw_users[j],
                         src_sm_info->cf_levels_kw_users[i])) {
                 if (set) {
-                    st_ses->sm_info.cf_levels[j] = src[i];
-                    ALOGV("%s: set: sm_info.cf_levels[%d]=%d", __func__,
-                          j, st_ses->sm_info.cf_levels[j]);
+                    p_info->sm_info.cf_levels[j] = src[i];
+                    ALOGV("%s: set: cf_levels[%d]=%d", __func__,
+                          j, p_info->sm_info.cf_levels[j]);
                 } else {
-                    st_ses->sm_info.cf_levels[j] = MAX_CONF_LEVEL_VALUE;
-                    ALOGV("%s: reset: sm_info.cf_levels[%d]=%d", __func__,
-                          j, st_ses->sm_info.cf_levels[j]);
+                    p_info->sm_info.cf_levels[j] = MAX_CONF_LEVEL_VALUE;
+                    ALOGV("%s: reset: cf_levels[%d]=%d", __func__,
+                          j, p_info->sm_info.cf_levels[j]);
                 }
             }
         }
@@ -1016,21 +1199,29 @@ static void check_and_extract_det_conf_levels_payload(
     unsigned char **dst, unsigned int *dst_size)
 {
     st_session_t *stc_ses = st_ses->det_stc_ses;
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
     int i = 0, j = 0;
 
     *dst = src;
     *dst_size = src_size;
 
     if (!st_ses->vendor_uuid_info->merge_fs_soundmodels ||
-        !st_ses->sm_info.sm_merged) {
+        !st_ses->sm_merged ||
+        stc_ses->f_stage_version == ST_MODULE_TYPE_PDK5) {
         ALOGV("%s:[%d] not merged", __func__, st_ses->sm_handle);
         return;
     }
 
-    if (src_size < st_ses->sm_info.cf_levels_size) {
+    p_info = get_sm_info_for_model_id(st_ses, 0);
+    if (!p_info) {
+        ALOGE("%s: Unexpected, no matching sm_info" , __func__);
+        return;
+    }
+
+    if (src_size < p_info->sm_info.cf_levels_size) {
         ALOGE("%s:[%d] Unexpected, detection conf payload size %d < %d",
               __func__, st_ses->sm_handle, src_size,
-              st_ses->sm_info.cf_levels_size);
+              p_info->sm_info.cf_levels_size);
         return;
     }
 
@@ -1038,12 +1229,12 @@ static void check_and_extract_det_conf_levels_payload(
     memset(stc_ses->sm_info.det_cf_levels, 0, stc_ses->sm_info.cf_levels_size);
 
     /* Extract the client conf level values from DSP payload */
-    for(i = 0; i < st_ses->sm_info.cf_levels_size; i++) {
+    for(i = 0; i < p_info->sm_info.cf_levels_size; i++) {
         if (!src[i])
             continue;
         for(j = 0; j < stc_ses->sm_info.cf_levels_size; j++) {
             if (!strcmp(stc_ses->sm_info.cf_levels_kw_users[j],
-                        st_ses->sm_info.cf_levels_kw_users[i])) {
+                        p_info->sm_info.cf_levels_kw_users[i])) {
                 stc_ses->sm_info.det_cf_levels[j] = src[i];
             }
         }
@@ -1162,15 +1353,11 @@ static void update_hw_config_on_restart(st_proxy_session_t *st_ses,
     st_session_t *stc_ses)
 {
     st_hw_session_t *hw_ses = st_ses->hw_ses_current;
-    struct st_hw_ses_config *sthw_cfg = &hw_ses->sthw_cfg;
+    struct st_hw_ses_config *sthw_cfg = NULL;
     struct listnode *node = NULL;
     st_session_t *c_ses = NULL;
     int hb_sz = 0, pr_sz = 0;
     bool enable_lab = false;
-
-    if (!st_ses->vendor_uuid_info->merge_fs_soundmodels ||
-        !st_ses->sm_info.sm_merged)
-        return;
 
     /*
      * Adjust history buffer and preroll durations to highest of
@@ -1193,14 +1380,48 @@ static void update_hw_config_on_restart(st_proxy_session_t *st_ses,
         }
     }
 
-    sthw_cfg->client_req_hist_buf = hb_sz;
-    sthw_cfg->client_req_preroll = pr_sz;
-    st_ses->lab_enabled = enable_lab;
+    sthw_cfg = get_sthw_cfg_for_model_id(hw_ses, stc_ses->sm_info.model_id);
+    if (!sthw_cfg) {
+        ALOGE("%s: Unexpected, no matching sthw_cfg", __func__);
+        return;
+    }
 
-    update_merge_conf_levels_payload(st_ses, &stc_ses->sm_info,
-                                     stc_ses->sm_info.cf_levels,
-                                     stc_ses->sm_info.cf_levels_size,
-                                     true);
+    if (st_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
+        if (!st_ses->vendor_uuid_info->merge_fs_soundmodels ||
+            !st_ses->sm_merged)
+            return;
+
+        sthw_cfg->client_req_hist_buf = hb_sz;
+        hw_ses->max_hist_buf = hb_sz;
+        sthw_cfg->client_req_preroll = pr_sz;
+        hw_ses->max_preroll = pr_sz;
+        st_ses->lab_enabled = enable_lab;
+
+        update_merge_conf_levels_payload(st_ses, &stc_ses->sm_info,
+                                         stc_ses->sm_info.cf_levels,
+                                         stc_ses->sm_info.cf_levels_size,
+                                         true);
+    } else {
+        sthw_cfg->client_req_hist_buf = stc_ses->hist_buf_duration;
+        hw_ses->max_hist_buf = hb_sz;
+        sthw_cfg->client_req_preroll = stc_ses->preroll_duration;
+        hw_ses->max_preroll = pr_sz;
+        st_ses->lab_enabled = enable_lab;
+
+        /*
+         * During stop, the conf levels get set to the max value
+         * to prevent detections while its client state is loaded
+         * and another sound model's client state is active. So
+         * during restart, the conf levels need to be reset from
+         * the cached stc_values to enable detections again.
+         */
+        memset(sthw_cfg->conf_levels, MAX_CONF_LEVEL_VALUE,
+            MAX_MULTI_SM_CONF_LEVELS);
+        memcpy(sthw_cfg->conf_levels, stc_ses->sm_info.cf_levels,
+            stc_ses->sm_info.cf_levels_size);
+        sthw_cfg->num_conf_levels = stc_ses->sm_info.cf_levels_size;
+    }
+
     hw_ses->sthw_cfg_updated = true;
 
     ALOGV("%s:[%d] lab_enabled %d, hb_sz %d, pr_sz %d", __func__,
@@ -1212,13 +1433,21 @@ static bool update_hw_config_on_stop(st_proxy_session_t *st_ses,
     st_session_t *stc_ses)
 {
     st_hw_session_t *hw_ses = st_ses->hw_ses_current;
-    struct st_hw_ses_config *sthw_cfg = &hw_ses->sthw_cfg;
+    struct st_hw_ses_config *sthw_cfg = NULL;
     struct listnode *node = NULL;
     st_session_t *c_ses = NULL;
     int hb_sz = 0, pr_sz = 0;
     bool active = false, enable_lab = false;
 
-    if (!st_ses->vendor_uuid_info->merge_fs_soundmodels) {
+    sthw_cfg = get_sthw_cfg_for_model_id(hw_ses, stc_ses->sm_info.model_id);
+    if (!sthw_cfg) {
+        ALOGE("%s: Unexpected, no matching sthw_cfg", __func__);
+        return false;
+    }
+
+    if (!st_ses->vendor_uuid_info->merge_fs_soundmodels &&
+        stc_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
+
         if (sthw_cfg->conf_levels) {
             ALOGV("%s: free hw conf_levels", __func__);
             free(sthw_cfg->conf_levels);
@@ -1246,26 +1475,54 @@ static bool update_hw_config_on_stop(st_proxy_session_t *st_ses,
                              !list_empty(&c_ses->second_stage_list);
         }
     }
-    if (!active) {
+
+    if (st_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
+        if (!active) {
+            sthw_cfg->client_req_hist_buf = 0;
+            hw_ses->max_hist_buf = 0;
+            sthw_cfg->client_req_preroll = 0;
+            hw_ses->max_preroll = 0;
+            st_ses->lab_enabled = false;
+            hw_ses->custom_data = NULL;
+            hw_ses->custom_data_size = 0;
+            hw_ses->sthw_cfg_updated = true;
+            ALOGV("%s:[%d] no active client hw cfg is reset", __func__,
+                  st_ses->sm_handle);
+            return false;
+        }
+
+        sthw_cfg->client_req_hist_buf = hb_sz;
+        hw_ses->max_hist_buf = hb_sz;
+        sthw_cfg->client_req_preroll = pr_sz;
+        hw_ses->max_preroll = pr_sz;
+        st_ses->lab_enabled = enable_lab;
+
+        update_merge_conf_levels_payload(st_ses, &stc_ses->sm_info,
+                                         stc_ses->sm_info.cf_levels,
+                                         stc_ses->sm_info.cf_levels_size,
+                                         false);
+    } else {
+        if (!active) {
+            hw_ses->max_hist_buf = 0;
+            hw_ses->max_preroll = 0;
+            st_ses->lab_enabled = false;
+            hw_ses->custom_data = NULL;
+            hw_ses->custom_data_size = 0;
+            hw_ses->sthw_cfg_updated = true;
+            return false;
+        }
+
         sthw_cfg->client_req_hist_buf = 0;
+        hw_ses->max_hist_buf = hb_sz;
         sthw_cfg->client_req_preroll = 0;
-        st_ses->lab_enabled = 0;
-        sthw_cfg->custom_data = NULL;
-        sthw_cfg->custom_data_size = 0;
-        hw_ses->sthw_cfg_updated = true;
-        ALOGV("%s:[%d] no active client hw cfg is reset", __func__,
-              st_ses->sm_handle);
-        return false;
+        hw_ses->max_preroll = pr_sz;
+        st_ses->lab_enabled = enable_lab;
+
+        memset(sthw_cfg->conf_levels, MAX_CONF_LEVEL_VALUE,
+            MAX_MULTI_SM_CONF_LEVELS);
+        sthw_cfg->num_conf_levels = 0;
     }
 
-    sthw_cfg->client_req_hist_buf = hb_sz;
-    sthw_cfg->client_req_preroll = pr_sz;
-    st_ses->lab_enabled = enable_lab;
-
-    update_merge_conf_levels_payload(st_ses, &stc_ses->sm_info,
-                                     stc_ses->sm_info.cf_levels,
-                                     stc_ses->sm_info.cf_levels_size,
-                                     false);
     hw_ses->sthw_cfg_updated = true;
 
     ALOGV("%s:[%d] lab_enabled %d, hb_sz %d, pr_sz %d", __func__,
@@ -1296,10 +1553,10 @@ static void get_conf_levels_from_dsp_payload(st_proxy_session_t *st_ses,
                 break;
             }
             i += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
-            payload += i;
+            payload += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
         }
     } else {
-        if ((st_ses->exec_mode == ST_EXEC_MODE_CPE) && st_ses->stdev->is_gcs) {
+        if (st_ses->exec_mode == ST_EXEC_MODE_CPE) {
             *conf_levels = payload + 2;
             *conf_levels_size = payload_size - 2;
         } else {
@@ -1315,69 +1572,116 @@ st_session_t* get_detected_client(st_proxy_session_t *st_ses,
     struct listnode *node = NULL;
     st_session_t *c_ses = NULL;
     unsigned char *conf_levels = NULL;
-    unsigned int conf_levels_size = 0;
+    unsigned int conf_levels_size = 0, key_id = 0, key_payload_size = 0;
     int i = 0, j = 0;
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
+    multi_model_result_info_t *result_info = NULL;
 
-    if (list_empty(&st_ses->clients_list)) {
-        ALOGE("%s:[%d] no clients attached!!", __func__, st_ses->sm_handle);
-        return NULL;
-    }
-    /*
-     * If only single client exist, this detection is not for merged
-     * sound model, hence return this as only available client
-     */
-    if (!check_for_multi_clients(st_ses)) {
-        ALOGV("%s:[%d] single client detection", __func__, st_ses->sm_handle);
-        node = list_head(&st_ses->clients_list);
-        c_ses = node_to_item(node, st_session_t, hw_list_node);
-        if (c_ses->state == ST_STATE_ACTIVE) {
-            ALOGD("%s: detected c%d", __func__, c_ses->sm_handle);
-            return c_ses;
-        } else {
-            ALOGE("%s: detected c%d is not active", __func__, c_ses->sm_handle);
+    if (st_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
+        p_info = get_sm_info_for_model_id(st_ses, 0);
+        if (!p_info) {
+            ALOGE("%s: Unexpected, no matching sm_info" , __func__);
             return NULL;
         }
-    }
 
-    get_conf_levels_from_dsp_payload(st_ses, payload, payload_size,
-                                     &conf_levels, &conf_levels_size);
-    if (!conf_levels) {
-        ALOGE("%s:[%d] no conf levels payload found!!", __func__,
-            st_ses->sm_handle);
-        return NULL;
-    }
-    if (conf_levels_size < st_ses->sm_info.num_keyphrases) {
-        ALOGE("%s:[%d] detection conf levels size %d < num of keywords %d",
-            __func__, st_ses->sm_handle, conf_levels_size,
-            st_ses->sm_info.num_keyphrases);
-        return NULL;
-    }
-
-    /*
-     * The DSP payload contains the keyword conf levels from the beginning.
-     * Only one keyword conf level is expected to be non-zero from keyword
-     * detection. Find non-zero conf level up to number of keyphrases and if
-     * one is found, match it to the corresponding keyphrase from list of
-     * clients to obtain the detected client.
-     */
-    for (i = 0; i < st_ses->sm_info.num_keyphrases; i++) {
-        if (!conf_levels[i])
-            continue;
-        list_for_each(node, &st_ses->clients_list) {
+        if (list_empty(&st_ses->clients_list)) {
+            ALOGE("%s:[%d] no clients attached!!", __func__,
+                st_ses->sm_handle);
+            return NULL;
+        }
+        /*
+         * If only single client exist, this detection is not for merged
+         * sound model, hence return this as only available client
+         */
+        if (!check_for_multi_clients(st_ses)) {
+            ALOGV("%s:[%d] single client detection", __func__,
+                st_ses->sm_handle);
+            node = list_head(&st_ses->clients_list);
             c_ses = node_to_item(node, st_session_t, hw_list_node);
-            for (j = 0; j < c_ses->sm_info.num_keyphrases; j++) {
-                if (!strcmp(st_ses->sm_info.keyphrases[i],
-                            c_ses->sm_info.keyphrases[j])) {
-                    if (c_ses->state == ST_STATE_ACTIVE) {
-                        ALOGV("%s: detected c%d", __func__, c_ses->sm_handle);
-                        return c_ses;
-                    } else {
-                        ALOGE("%s: detected c%d is not active", __func__,
-                            c_ses->sm_handle);
-                        return NULL;
+            if (c_ses->state == ST_STATE_ACTIVE) {
+                ALOGD("%s: detected c%d", __func__, c_ses->sm_handle);
+                return c_ses;
+            } else {
+                ALOGE("%s: detected c%d is not active", __func__,
+                    c_ses->sm_handle);
+                return NULL;
+            }
+        }
+
+        get_conf_levels_from_dsp_payload(st_ses, payload, payload_size,
+                                         &conf_levels, &conf_levels_size);
+        if (!conf_levels) {
+            ALOGE("%s:[%d] no conf levels payload found!!", __func__,
+                st_ses->sm_handle);
+            return NULL;
+        }
+        if (conf_levels_size < p_info->sm_info.num_keyphrases) {
+            ALOGE("%s:[%d] detection conf levels size %d < num of keywords %d",
+                __func__, st_ses->sm_handle, conf_levels_size,
+                p_info->sm_info.num_keyphrases);
+            return NULL;
+        }
+
+        /*
+         * The DSP payload contains the keyword conf levels from the beginning.
+         * Only one keyword conf level is expected to be non-zero from keyword
+         * detection. Find non-zero conf level up to number of keyphrases and
+         * if one is found, match it to the corresponding keyphrase from list
+         * of clients to obtain the detected client.
+         */
+        for (i = 0; i < p_info->sm_info.num_keyphrases; i++) {
+            if (!conf_levels[i])
+                continue;
+            list_for_each(node, &st_ses->clients_list) {
+                c_ses = node_to_item(node, st_session_t, hw_list_node);
+                for (j = 0; j < c_ses->sm_info.num_keyphrases; j++) {
+                    if (!strcmp(p_info->sm_info.keyphrases[i],
+                                c_ses->sm_info.keyphrases[j])) {
+                        if (c_ses->state == ST_STATE_ACTIVE) {
+                            ALOGV("%s: detected c%d", __func__,
+                                c_ses->sm_handle);
+                            return c_ses;
+                        } else {
+                            ALOGE("%s: detected c%d is not active", __func__,
+                                c_ses->sm_handle);
+                            return NULL;
+                        }
                     }
                 }
             }
+        }
+    } else {
+        while (i < payload_size) {
+            key_id = *(uint32_t *)payload;
+            key_payload_size = *((uint32_t *)payload + 1);
+
+            if (key_id == KEY_ID_MULTI_MODEL_RESULT_INFO) {
+                result_info = (multi_model_result_info_t *)(payload +
+                    GENERIC_DET_EVENT_HEADER_SIZE);
+                list_for_each(node, &st_ses->clients_list) {
+                    c_ses = node_to_item(node, st_session_t, hw_list_node);
+                    if (c_ses->sm_info.model_id ==
+                        result_info->detected_model_id) {
+                        if (c_ses->state == ST_STATE_ACTIVE) {
+                            ALOGD("%s: detected c%d, 1st stage conf level = %d",
+                                __func__, c_ses->sm_handle,
+                                result_info->best_confidence_level);
+                            return c_ses;
+                        } else {
+                            ALOGE("%s: detected c%d is not active", __func__,
+                                c_ses->sm_handle);
+                            return NULL;
+                        }
+                    }
+                }
+                break;
+            } else {
+                ALOGE("%s: Unexpected key id for PDK5 0x%x", __func__,
+                      key_id);
+                break;
+            }
+            i += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
+            payload += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
         }
     }
     return c_ses;
@@ -2033,7 +2337,7 @@ static int parse_rc_config_key_conf_levels
         for (i = 0; i < conf_levels->num_sound_models; i++) {
             sm_levels = &conf_levels->conf_levels[i];
             if (sm_levels->sm_id == ST_SM_ID_SVA_GMM) {
-                if ((st_ses->stdev->is_gcs) && (st_hw_ses == st_ses->hw_ses_cpe))
+                if (st_hw_ses == st_ses->hw_ses_cpe)
                     status =
                         generate_sound_trigger_recognition_config_payload_v2(
                         (void *)sm_levels, out_conf_levels, out_num_conf_levels,
@@ -2090,8 +2394,7 @@ static int parse_rc_config_key_conf_levels
         for (i = 0; i < conf_levels_v2->num_sound_models; i++) {
             sm_levels_v2 = &conf_levels_v2->conf_levels[i];
             if (sm_levels_v2->sm_id == ST_SM_ID_SVA_GMM) {
-                if ((st_ses->stdev->is_gcs) &&
-                    (st_hw_ses == st_ses->hw_ses_cpe))
+                if (st_hw_ses == st_ses->hw_ses_cpe)
                     status =
                         generate_sound_trigger_recognition_config_payload_v2(
                         (void *)sm_levels_v2, out_conf_levels, out_num_conf_levels,
@@ -2162,6 +2465,7 @@ static int update_hw_config_on_start(st_session_t *stc_ses,
     unsigned int opaque_size = 0, conf_levels_payload_size = 0;
     int status = 0;
     bool enable_lab = false;
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
 
     if (st_ses->stdev->enable_debug_dumps) {
         ST_DBG_DECLARE(FILE *rc_opaque_fd = NULL;
@@ -2269,7 +2573,7 @@ static int update_hw_config_on_start(st_session_t *stc_ses,
 
         if (st_ses->vendor_uuid_info->is_qcva_uuid ||
             st_ses->vendor_uuid_info->is_qcmd_uuid) {
-            if (st_ses->stdev->is_gcs && st_hw_ses == st_ses->hw_ses_cpe)
+            if (st_hw_ses == st_ses->hw_ses_cpe)
                 status = generate_conf_levels_payload_from_rc_config_v2(
                     phrase_sm, rc_config, &conf_levels, &num_conf_levels);
             else
@@ -2285,105 +2589,205 @@ static int update_hw_config_on_start(st_session_t *stc_ses,
         }
     }
 
-    sthw_cfg = &st_hw_ses->sthw_cfg;
     enable_lab = stc_ses->rc_config->capture_requested ||
                  !list_empty(&stc_ses->second_stage_list);
 
-    if (v_info->merge_fs_soundmodels) {
-        /* merge_fs_soundmodels is true only for QC SVA UUID */
+    sthw_cfg = get_sthw_cfg_for_model_id(st_hw_ses,
+        stc_ses->sm_info.model_id);
+    if (!sthw_cfg) {
+        ALOGE("%s: Unexpected, no matching sthw_cfg", __func__);
+        return -EINVAL;
+    }
 
-         /*
-          * Note:
-          * For ADSP case, the generated conf levles size must be equal to
-          * SML queried conf levels.
-          * For WDSP gcs case, there is additional payload for KW enable
-          * fields in generated conf_levels. If merge sound model is supported
-          * on WDSP case, update logic here accordingly.
-          */
-        if (num_conf_levels != stc_ses->sm_info.cf_levels_size) {
-            ALOGE("%s: Unexpected, client cf levels %d != sm_info cf levels %d",
-                __func__, num_conf_levels, stc_ses->sm_info.cf_levels_size);
-            return -EINVAL;
+    if (stc_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
+        if (v_info->merge_fs_soundmodels) {
+            /* merge_fs_soundmodels is true only for QC SVA UUID */
+
+             /*
+              * Note:
+              * For ADSP case, the generated conf levles size must be equal to
+              * SML queried conf levels.
+              * For WDSP gcs case, there is additional payload for KW enable
+              * fields in generated conf_levels. If merge sound model is supported
+              * on WDSP case, update logic here accordingly.
+              */
+            if (num_conf_levels != stc_ses->sm_info.cf_levels_size) {
+                ALOGE("%s: Unexpected, client cf levels %d != sm_info cf levels %d",
+                    __func__, num_conf_levels, stc_ses->sm_info.cf_levels_size);
+                return -EINVAL;
+            }
+
+            /*
+             * If any of the active clients requested capture or enabled the
+             * second stage, the underlying hw session buffering needs to
+             * be enabled. Ignore if it is already enabled.
+             */
+            if (!st_ses->lab_enabled && enable_lab)
+                st_ses->lab_enabled = true;
+
+            /* Aggregate DSP configuration for highest client configuration */
+
+            /* SVA2.0 sound models */
+            if (!stc_ses->hist_buf_duration &&
+                stc_ses->rc_config->capture_requested &&
+                (stc_ses->rc_config->data_size > 0)) {
+                stc_ses->hist_buf_duration = st_ses->vendor_uuid_info->kw_duration;
+                stc_ses->preroll_duration = 0;
+            }
+
+            if (stc_ses->hist_buf_duration > sthw_cfg->client_req_hist_buf) {
+                sthw_cfg->client_req_hist_buf = stc_ses->hist_buf_duration;
+                st_hw_ses->max_hist_buf = stc_ses->hist_buf_duration;
+            }
+            if (stc_ses->preroll_duration > sthw_cfg->client_req_preroll) {
+                sthw_cfg->client_req_preroll = stc_ses->preroll_duration;
+                st_hw_ses->max_preroll = stc_ses->preroll_duration;
+            }
+
+            ALOGV("%s: client hb_sz %d pr_sz %d, sthw lab %d hb_sz %d "
+                  "pr_sz %d", __func__, stc_ses->hist_buf_duration,
+                  stc_ses->preroll_duration, st_ses->lab_enabled,
+                  sthw_cfg->client_req_hist_buf, sthw_cfg->client_req_preroll);
+
+            /* Cache it to use when client restarts without config update or
+             * during only one remaining client model as there won't be a
+             * merged model yet.
+             */
+
+            /*
+             * User verification confidence is not required
+             * in SVA5 PDK_UV case. As first stage doesn't
+             * support user verification.
+             */
+            num_conf_levels = 1;
+            memcpy(stc_ses->sm_info.cf_levels, conf_levels,
+                   stc_ses->sm_info.cf_levels_size);
+
+            status = update_merge_conf_levels_payload(st_ses, &stc_ses->sm_info,
+                conf_levels, num_conf_levels, true);
+            free(conf_levels); /* Merged model conf levels will be used further */
+            if (status)
+                return status;
+
+            p_info = get_sm_info_for_model_id(st_ses, 0);
+            if (!p_info) {
+                ALOGE("%s: Unexpected, no matching sm_info" , __func__);
+                status = -EINVAL;
+                return status;
+            }
+
+            sthw_cfg->conf_levels = p_info->sm_info.cf_levels;
+            sthw_cfg->num_conf_levels = p_info->sm_info.cf_levels_size;
+            sthw_cfg->model_id = 0;
+            st_hw_ses->sthw_cfg_updated = true;
+
+            /*
+             * Merging further unknown custom data is not needed, as
+             * SVA doesn't support unkown custom data. if required in future,
+             * handle here.
+             * For now just copy the the current client data which is same
+             * across SVA engines.
+             * Update the custom data for the case in which one client session
+             * does not have custom data and another one does.
+             */
+            if (rc_config->data_size > st_hw_ses->custom_data_size) {
+                st_hw_ses->custom_data = (char *)rc_config + rc_config->data_offset;
+                st_hw_ses->custom_data_size =  rc_config->data_size;
+            }
+        } else {
+            st_ses->recognition_mode = stc_ses->recognition_mode;
+            st_ses->lab_enabled = enable_lab;
+            sthw_cfg->client_req_hist_buf = stc_ses->hist_buf_duration;
+            st_hw_ses->max_hist_buf = stc_ses->hist_buf_duration;
+            sthw_cfg->client_req_preroll = stc_ses->preroll_duration;
+            st_hw_ses->max_preroll = stc_ses->preroll_duration;
+
+            if (sthw_cfg->conf_levels)
+                free(sthw_cfg->conf_levels);
+            sthw_cfg->conf_levels = conf_levels;
+            sthw_cfg->num_conf_levels = num_conf_levels;
+
+            st_hw_ses->custom_data = (char *)rc_config + rc_config->data_offset;
+            st_hw_ses->custom_data_size =  rc_config->data_size;
         }
 
-        /*
-         * If any of the active clients requested capture or enabled the
-         * second stage, the underlying hw session buffering needs to
-         * be enabled. Ignore if it is already enabled.
-         */
+
+    } else {
         if (!st_ses->lab_enabled && enable_lab)
             st_ses->lab_enabled = true;
 
-        /* Aggregate DSP configuration for highest client configuration */
+        sthw_cfg->client_req_hist_buf = stc_ses->hist_buf_duration;
+        if (st_hw_ses->max_hist_buf < stc_ses->hist_buf_duration)
+            st_hw_ses->max_hist_buf = stc_ses->hist_buf_duration;
 
-        /* SVA2.0 sound models */
-        if (!stc_ses->hist_buf_duration &&
-            stc_ses->rc_config->capture_requested &&
-            (stc_ses->rc_config->data_size > 0)) {
-            stc_ses->hist_buf_duration = st_ses->vendor_uuid_info->kw_duration;
-            stc_ses->preroll_duration = 0;
-        }
-
-        if (stc_ses->hist_buf_duration > sthw_cfg->client_req_hist_buf)
-            sthw_cfg->client_req_hist_buf = stc_ses->hist_buf_duration;
-        if (stc_ses->preroll_duration > sthw_cfg->client_req_preroll)
-            sthw_cfg->client_req_preroll = stc_ses->preroll_duration;
-
-        ALOGV("%s: client hb_sz %d pr_sz %d, sthw lab %d hb_sz %d "
-              "pr_sz %d", __func__, stc_ses->hist_buf_duration,
-              stc_ses->preroll_duration, st_ses->lab_enabled,
-              sthw_cfg->client_req_hist_buf, sthw_cfg->client_req_preroll);
-
-        /* Cache it to use when client restarts without config update or
-         * during only one remaining client model as there won't be a
-         * merged model yet.
-         */
-        memcpy(stc_ses->sm_info.cf_levels, conf_levels,
-               stc_ses->sm_info.cf_levels_size);
-
-        status = update_merge_conf_levels_payload(st_ses, &stc_ses->sm_info,
-            conf_levels, num_conf_levels, true);
-        free(conf_levels); /* Merged model conf levels will be used further */
-        if (status)
-            return status;
-
-        sthw_cfg->conf_levels = st_ses->sm_info.cf_levels;
-        sthw_cfg->num_conf_levels = st_ses->sm_info.cf_levels_size;
-        st_hw_ses->sthw_cfg_updated = true;
+        sthw_cfg->client_req_preroll = stc_ses->preroll_duration;
+        if (st_hw_ses->max_preroll < stc_ses->preroll_duration)
+            st_hw_ses->max_preroll = stc_ses->preroll_duration;
 
         /*
-         * Merging further unknown custom data is not needed, as
-         * SVA doesn't support unkown custom data. if required in future,
-         * handle here.
-         * For now just copy the the current client data which is same
-         * across SVA engines.
-         * Update the custom data for the case in which one client session
-         * does not have custom data and another one does.
+         * Cache it to use when client restarts without
+         * config update
          */
-        if (rc_config->data_size > sthw_cfg->custom_data_size) {
-            sthw_cfg->custom_data = (char *)rc_config + rc_config->data_offset;
-            sthw_cfg->custom_data_size =  rc_config->data_size;
-        }
+        memcpy(stc_ses->sm_info.cf_levels, conf_levels,
+               num_conf_levels);
+        stc_ses->sm_info.cf_levels_size = num_conf_levels;
 
-    } else {
-        st_ses->recognition_mode = stc_ses->recognition_mode;
-        st_ses->lab_enabled = enable_lab;
-
-        sthw_cfg->client_req_hist_buf = stc_ses->hist_buf_duration;
-        sthw_cfg->client_req_preroll = stc_ses->preroll_duration;
-
-        if (sthw_cfg->conf_levels)
-            free(sthw_cfg->conf_levels);
-        sthw_cfg->conf_levels = conf_levels;
+        memcpy(sthw_cfg->conf_levels, conf_levels,
+               num_conf_levels);
         sthw_cfg->num_conf_levels = num_conf_levels;
+        free(conf_levels);
 
-        sthw_cfg->custom_data = (char *)rc_config + rc_config->data_offset;
-        sthw_cfg->custom_data_size =  rc_config->data_size;
+        if (rc_config->data_size >= st_hw_ses->custom_data_size) {
+            st_hw_ses->custom_data = (char *)rc_config + rc_config->data_offset;
+            st_hw_ses->custom_data_size =  rc_config->data_size;
+        }
+        st_hw_ses->sthw_cfg_updated = true;
     }
     ALOGD("%s:[%d] lab enabled %d", __func__, st_ses->sm_handle,
           st_ses->lab_enabled);
 
     return status;
+}
+
+static int reg_all_sm(st_proxy_session_t *st_ses, st_hw_session_t *hw_ses)
+{
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
+    struct listnode *node = NULL;
+    int status = 0;
+
+    list_for_each(node, &st_ses->sm_info_list) {
+        p_info = node_to_item(node, struct st_proxy_ses_sm_info_wrapper,
+            sm_list_node);
+        status = hw_ses->fptrs->reg_sm(hw_ses, p_info->sm_info.sm_data,
+            p_info->sm_info.sm_size, p_info->sm_info.model_id);
+        if (status) {
+            ALOGE("%s:[%d] reg_sm failed, model_id = %d, status = %d", __func__,
+                st_ses->sm_handle, p_info->sm_info.model_id, status);
+            return status;
+        }
+    }
+
+    return 0;
+}
+
+static int dereg_all_sm(st_proxy_session_t *st_ses, st_hw_session_t *hw_ses)
+{
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
+    struct listnode *node = NULL;
+    int status = 0, ret = 0;
+
+    list_for_each(node, &st_ses->sm_info_list) {
+        p_info = node_to_item(node, struct st_proxy_ses_sm_info_wrapper,
+            sm_list_node);
+        status = hw_ses->fptrs->dereg_sm(hw_ses, p_info->sm_info.model_id);
+        if (status) {
+            ALOGE("%s:[%d] dereg_sm failed, model_id = %d, status = %d", __func__,
+                st_ses->sm_handle, p_info->sm_info.model_id, status);
+            ret = status;
+        }
+    }
+
+    return ret;
 }
 
 static void do_hw_sess_cleanup(st_proxy_session_t *st_ses,
@@ -2404,7 +2808,7 @@ static void do_hw_sess_cleanup(st_proxy_session_t *st_ses,
         hw_ses->fptrs->set_device(hw_ses, false);
 
     if (err & HW_SES_ERR_MASK_REG_SM)
-        hw_ses->fptrs->dereg_sm(hw_ses);
+        dereg_all_sm(st_ses, hw_ses);
 }
 
 static void reg_hal_event_session(st_session_t *stc_ses,
@@ -2525,7 +2929,7 @@ static int start_hw_session(st_proxy_session_t *st_ses, st_hw_session_t *hw_ses,
     if (do_unload) {
         if (!load_sm) {
             load_sm = true;
-            status = hw_ses->fptrs->dereg_sm(hw_ses);
+            status = dereg_all_sm(st_ses, hw_ses);
             if (status)
                 ALOGW("%s:[%d] failed to dereg_sm err %d", __func__,
                     st_ses->sm_handle, status);
@@ -2533,8 +2937,7 @@ static int start_hw_session(st_proxy_session_t *st_ses, st_hw_session_t *hw_ses,
     }
 
     if (load_sm) {
-        status = hw_ses->fptrs->reg_sm(hw_ses, st_ses->sm_info.sm_data,
-            st_ses->sm_info.sm_size, st_ses->sm_info.sm_type);
+        status = reg_all_sm(st_ses, hw_ses);
         if (status) {
             ALOGE("%s:[%d] failed to reg_sm err %d", __func__,
                 st_ses->sm_handle, status);
@@ -2552,8 +2955,7 @@ static int start_hw_session(st_proxy_session_t *st_ses, st_hw_session_t *hw_ses,
     err |= HW_SES_ERR_MASK_DEVICE_SET;
 
     status = hw_ses->fptrs->reg_sm_params(hw_ses, st_ses->recognition_mode,
-        st_ses->lab_enabled, st_ses->rc_config, st_ses->sm_info.sm_type,
-        st_ses->sm_info.sm_data);
+        st_ses->lab_enabled, st_ses->rc_config);
     if (status) {
         ALOGE("%s:[%d] failed to reg_sm_params err %d", __func__,
             st_ses->sm_handle, status);
@@ -2604,7 +3006,7 @@ static int stop_hw_session(st_proxy_session_t *st_ses, st_hw_session_t *hw_ses,
         rc = status;
     }
     if (unload_sm) {
-        status = hw_ses->fptrs->dereg_sm(hw_ses);
+        status = dereg_all_sm(st_ses, hw_ses);
         if (status) {
             ALOGE("%s:[%d] failed to dereg_sm, err %d", __func__,
                 st_ses->sm_handle, status);
@@ -2640,13 +3042,17 @@ static int restart_session(st_proxy_session_t *st_ses, st_hw_session_t *hw_ses)
     int status = 0;
 
     status = hw_ses->fptrs->restart(hw_ses, st_ses->recognition_mode,
-            st_ses->rc_config, st_ses->sm_info.sm_type,
-            st_ses->sm_info.sm_data);
+            st_ses->rc_config);
     if (status == 0) {
         st_ses->hw_session_started = true;
     } else {
         ALOGE("%s:[%d] failed to restart", __func__, st_ses->sm_handle);
-        st_ses->hw_session_started = false;
+        /*
+         * lower layers like gcs/lsm need to handle double stop calls properly
+         * to avoid possible crash, as some of the clean ups are already issued
+         * during fptrs->restart() when it's failed.
+         */
+        stop_hw_session(st_ses, hw_ses, true);
     }
 
     return status;
@@ -2683,6 +3089,7 @@ static int get_first_stage_detection_params(st_proxy_session_t *st_ses,
     st_arm_second_stage_t *st_sec_stage = NULL;
     st_session_t *stc_ses = st_ses->det_stc_ses;
     bool is_active_vop_session = false;
+    multi_model_result_info_t *result_info = NULL;
 
     list_for_each(node, &stc_ses->second_stage_list) {
         st_sec_stage = node_to_item(node, st_arm_second_stage_t, list_node);
@@ -2704,13 +3111,20 @@ static int get_first_stage_detection_params(st_proxy_session_t *st_ses,
             key_payload_size = *((uint32_t *)payload_ptr + 1);
 
             switch (key_id) {
+            case KEY_ID_MULTI_MODEL_RESULT_INFO:
+                result_info = (multi_model_result_info_t *)(payload_ptr +
+                    GENERIC_DET_EVENT_HEADER_SIZE);
+                hw_ses->kw_start_idx = result_info->keyword_start_idx_bytes;
+                hw_ses->kw_end_idx = result_info->keyword_end_idx_bytes;
+                break;
+
             case KEY_ID_CONFIDENCE_LEVELS:
                 if (is_active_vop_session) {
                     /*
                      * It is expected that VoP is supported with single KW/user
                      * SVA3.0 model, hence get it directly with hard offset.
                      */
-                    if (!st_ses->sm_info.sm_merged) {
+                    if (!st_ses->sm_merged) {
                         hw_ses->user_level = (int32_t)(*(payload_ptr +
                             GENERIC_DET_EVENT_USER_LEVEL_OFFSET));
                     } else {
@@ -2735,13 +3149,17 @@ static int get_first_stage_detection_params(st_proxy_session_t *st_ses,
                     GENERIC_DET_EVENT_KW_END_OFFSET);
                 break;
 
+            case KEY_ID_TIMESTAMP_INFO:
+                /* No op */
+                break;
+
             default:
                 ALOGW("%s: Unsupported generic detection event key id",
                     __func__);
                 break;
             }
             count_size += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
-            payload_ptr += count_size;
+            payload_ptr += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
         }
     } else {
         /*
@@ -2752,9 +3170,9 @@ static int get_first_stage_detection_params(st_proxy_session_t *st_ses,
          * duration from platform xml will be used.
          */
         hw_ses->kw_start_idx = 0;
-        if (hw_ses->sthw_cfg.client_req_hist_buf) {
+        if (hw_ses->max_hist_buf) {
             hw_ses->kw_end_idx =
-                convert_ms_to_bytes(hw_ses->sthw_cfg.client_req_hist_buf,
+                convert_ms_to_bytes(hw_ses->max_hist_buf,
                     &hw_ses->config);
         } else {
             hw_ses->kw_end_idx =
@@ -2763,12 +3181,10 @@ static int get_first_stage_detection_params(st_proxy_session_t *st_ses,
         }
 
         if (is_active_vop_session) {
-            if ((st_ses->exec_mode == ST_EXEC_MODE_CPE) &&
-                 st_ses->stdev->is_gcs) {
+            if (st_ses->exec_mode == ST_EXEC_MODE_CPE) {
                 hw_ses->user_level = (int32_t)(*(payload_ptr +
                     GCS_NON_GENERIC_USER_LEVEL_OFFSET));
-            } else if ((st_ses->exec_mode == ST_EXEC_MODE_ADSP) ||
-                       !st_ses->stdev->is_gcs) {
+            } else if (st_ses->exec_mode == ST_EXEC_MODE_ADSP) {
                 hw_ses->user_level = (int32_t)(*(payload_ptr +
                     LSM_NON_GENERIC_USER_LEVEL_OFFSET));
             }
@@ -2893,6 +3309,22 @@ static size_t set_opaque_data_size(char *payload, size_t payload_size,
         key_payload_size = *((uint32_t *)payload + 1);
 
         switch (key_id) {
+        case KEY_ID_MULTI_MODEL_RESULT_INFO:
+            opaque_size += sizeof(struct st_param_header);
+            if (version != CONF_LEVELS_INTF_VERSION_0002) {
+                opaque_size +=
+                    sizeof(struct st_confidence_levels_info);
+            } else {
+                opaque_size +=
+                    sizeof(struct st_confidence_levels_info_v2);
+            }
+
+            opaque_size += sizeof(struct st_param_header) +
+                sizeof(struct st_keyword_indices_info);
+            opaque_size += sizeof(struct st_param_header) +
+                sizeof(struct st_timestamp_info);
+            break;
+
         case KEY_ID_CONFIDENCE_LEVELS:
             opaque_size += sizeof(struct st_param_header);
             if (version != CONF_LEVELS_INTF_VERSION_0002) {
@@ -2902,24 +3334,25 @@ static size_t set_opaque_data_size(char *payload, size_t payload_size,
                 opaque_size +=
                     sizeof(struct st_confidence_levels_info_v2);
             }
-            count_size += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
-            payload += count_size;
             break;
 
         case KEY_ID_KEYWORD_POSITION_STATS:
             opaque_size += sizeof(struct st_param_header) +
                 sizeof(struct st_keyword_indices_info);
-            count_size += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
-            payload += count_size;
+            break;
+
+        case KEY_ID_TIMESTAMP_INFO:
+            opaque_size += sizeof(struct st_param_header) +
+                sizeof(struct st_timestamp_info);
             break;
 
         default:
             ALOGE("%s: Unsupported generic detection event key id", __func__);
+            break;
         }
+        count_size += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
+        payload += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
     }
-
-    opaque_size += sizeof(struct st_param_header) +
-        sizeof(struct st_timestamp_info);
 
     return opaque_size;
 }
@@ -3097,6 +3530,7 @@ static int parse_generic_event_and_pack_opaque_data(
     struct sound_trigger_phrase_recognition_event *local_event)
 {
     uint32_t key_id = 0, key_payload_size = 0;
+    uint32_t timestamp_msw = 0, timestamp_lsw = 0;
     struct st_param_header *param_hdr = NULL;
     struct st_keyword_indices_info *kw_indices = NULL;
     struct st_timestamp_info *timestamps = NULL;
@@ -3107,15 +3541,91 @@ static int parse_generic_event_and_pack_opaque_data(
     int status = 0;
     unsigned char *cf_levels = NULL;
     unsigned int cf_levels_size = 0;
+    multi_model_result_info_t *result_info = NULL;
 
     while (count_size < payload_size) {
         key_id = *(uint32_t *)payload;
         key_payload_size = *((uint32_t *)payload + 1);
 
         switch (key_id) {
+        case KEY_ID_MULTI_MODEL_RESULT_INFO:
+            if (st_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
+                ALOGE("%s: Error. Multi sm result info supported on PDK5 only",
+                    __func__);
+                status = -EINVAL;
+                goto exit;
+            }
+            /* Set confidence levels */
+            param_hdr = (struct st_param_header *)opaque_data;
+            param_hdr->key_id = ST_PARAM_KEY_CONFIDENCE_LEVELS;
+            opaque_data += sizeof(struct st_param_header);
+            if (stc_ses->conf_levels_intf_version !=
+                CONF_LEVELS_INTF_VERSION_0002) {
+                param_hdr->payload_size =
+                    sizeof(struct st_confidence_levels_info);
+            } else {
+                param_hdr->payload_size =
+                    sizeof(struct st_confidence_levels_info_v2);
+            }
+            result_info = (multi_model_result_info_t *)(payload +
+                GENERIC_DET_EVENT_HEADER_SIZE);
+
+            memset(stc_ses->sm_info.det_cf_levels, 0,
+                MAX_MULTI_SM_CONF_LEVELS);
+
+            cf_levels = stc_ses->sm_info.det_cf_levels;
+            cf_levels_size = stc_ses->sm_info.cf_levels_size;
+            memcpy(opaque_data, stc_ses->st_conf_levels,
+                param_hdr->payload_size);
+            *(cf_levels + result_info->detected_keyword_id) =
+                result_info->best_confidence_level;
+            pack_opaque_data_conf_levels(st_ses, opaque_data,
+                cf_levels, cf_levels_size);
+            pack_recognition_event_conf_levels(st_ses, cf_levels,
+                cf_levels_size, local_event);
+            opaque_data += param_hdr->payload_size;
+
+            /* Set keyword indices */
+            param_hdr = (struct st_param_header *)opaque_data;
+            param_hdr->key_id = ST_PARAM_KEY_KEYWORD_INDICES;
+            param_hdr->payload_size = sizeof(struct st_keyword_indices_info);
+            opaque_data += sizeof(struct st_param_header);
+            kw_indices = (struct st_keyword_indices_info *)opaque_data;
+            kw_indices->version = 0x1;
+            kw_indices->start_index = result_info->keyword_start_idx_bytes;
+            kw_indices->end_index = result_info->keyword_end_idx_bytes;
+
+            list_for_each(node, &stc_ses->second_stage_list) {
+                st_sec_stage = node_to_item(node, st_arm_second_stage_t,
+                                            list_node);
+                if (IS_KEYWORD_DETECTION_MODEL(st_sec_stage->ss_info->sm_id)) {
+                    kw_indices->start_index =
+                        st_sec_stage->ss_session->kw_start_idx;
+                    kw_indices->end_index =
+                        st_sec_stage->ss_session->kw_end_idx;
+                }
+            }
+            opaque_data += sizeof(struct st_keyword_indices_info);
+
+            /* Set timestamp */
+            param_hdr = (struct st_param_header *)opaque_data;
+            param_hdr->key_id = ST_PARAM_KEY_TIMESTAMP;
+            param_hdr->payload_size = sizeof(struct st_timestamp_info);
+            opaque_data += sizeof(struct st_param_header);
+            timestamps = (struct st_timestamp_info *)opaque_data;
+            timestamps->version = 0x1;
+            timestamps->first_stage_det_event_time =
+                (uint64_t)result_info->timestamp_msw_us << 32 |
+                result_info->timestamp_lsw_us;
+            if (!list_empty(&stc_ses->second_stage_list))
+                timestamps->second_stage_det_event_time =
+                    st_ses->hw_ses_current->second_stage_det_event_time;
+            opaque_data += sizeof(struct st_timestamp_info);
+            break;
+
         case KEY_ID_CONFIDENCE_LEVELS:
             /* Pack the opaque data confidence levels structure */
-            param_hdr = (struct st_param_header *)(opaque_data);
+            param_hdr = (struct st_param_header *)opaque_data;
             param_hdr->key_id = ST_PARAM_KEY_CONFIDENCE_LEVELS;
             opaque_data += sizeof(struct st_param_header);
             if (stc_ses->conf_levels_intf_version !=
@@ -3144,11 +3654,11 @@ static int parse_generic_event_and_pack_opaque_data(
 
         case KEY_ID_KEYWORD_POSITION_STATS:
             /* Pack the opaque data keyword indices structure */
-            param_hdr = (struct st_param_header *)(opaque_data);
+            param_hdr = (struct st_param_header *)opaque_data;
             param_hdr->key_id = ST_PARAM_KEY_KEYWORD_INDICES;
             param_hdr->payload_size = sizeof(struct st_keyword_indices_info);
             opaque_data += sizeof(struct st_param_header);
-            kw_indices = (struct st_keyword_indices_info *)(opaque_data);
+            kw_indices = (struct st_keyword_indices_info *)opaque_data;
             kw_indices->version = 0x1;
             kw_indices->start_index = *((uint32_t *)payload + 3);
             kw_indices->end_index = *((uint32_t *)payload + 4);
@@ -3166,28 +3676,32 @@ static int parse_generic_event_and_pack_opaque_data(
             opaque_data += sizeof(struct st_keyword_indices_info);
             break;
 
+        case KEY_ID_TIMESTAMP_INFO:
+            /* Pack the opaque data detection timestamp structure */
+            param_hdr = (struct st_param_header *)opaque_data;
+            param_hdr->key_id = ST_PARAM_KEY_TIMESTAMP;
+            param_hdr->payload_size = sizeof(struct st_timestamp_info);
+            opaque_data += sizeof(struct st_param_header);
+            timestamp_lsw = *((uint32_t *)payload + 3);
+            timestamp_msw = *((uint32_t *)payload + 4);
+            timestamps = (struct st_timestamp_info *)opaque_data;
+            timestamps->version = 0x1;
+            timestamps->first_stage_det_event_time =
+                (uint64_t)timestamp_msw << 32 | timestamp_lsw;
+            if (!list_empty(&stc_ses->second_stage_list))
+                timestamps->second_stage_det_event_time =
+                    st_ses->hw_ses_current->second_stage_det_event_time;
+            opaque_data += sizeof(struct st_timestamp_info);
+            break;
+
         default:
             ALOGE("%s: Unsupported generic detection event key id", __func__);
             status = -EINVAL;
             goto exit;
         }
         count_size += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
-        payload += count_size;
+        payload += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
     }
-
-    /* Pack the opaque data detection timestamp structure */
-    param_hdr = (struct st_param_header *)(opaque_data);
-    param_hdr->key_id = ST_PARAM_KEY_TIMESTAMP;
-    param_hdr->payload_size = sizeof(struct st_timestamp_info);
-    opaque_data += sizeof(struct st_param_header);
-    timestamps = (struct st_timestamp_info *)(opaque_data);
-    timestamps->version = 0x1;
-    timestamps->first_stage_det_event_time =
-    st_ses->hw_ses_current->first_stage_det_event_time;
-    if (!list_empty(&stc_ses->second_stage_list))
-        timestamps->second_stage_det_event_time =
-            st_ses->hw_ses_current->second_stage_det_event_time;
-    opaque_data += sizeof(struct st_timestamp_info);
 
 exit:
     return status;
@@ -3201,7 +3715,7 @@ static int parse_generic_event_without_opaque_data(
     size_t count_size = 0;
     int status = 0;
     unsigned char *cf_levels = NULL;
-    unsigned int cf_levels_size = 0;;
+    unsigned int cf_levels_size = 0;
 
     while (count_size < payload_size) {
         key_id = *(uint32_t *)payload;
@@ -3222,7 +3736,12 @@ static int parse_generic_event_without_opaque_data(
 
         case KEY_ID_KEYWORD_POSITION_STATS:
             count_size += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
-            payload += count_size;
+            payload += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
+            break;
+
+        case KEY_ID_TIMESTAMP_INFO:
+            count_size += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
+            payload += GENERIC_DET_EVENT_HEADER_SIZE + key_payload_size;
             break;
 
         default:
@@ -3419,11 +3938,10 @@ static int process_detection_event_keyphrase(
             sizeof(struct sound_trigger_phrase_recognition_event);
         local_event->common.data_size = opaque_size;
         opaque_data = (uint8_t *)local_event + local_event->common.data_offset;
-        if ((st_ses->exec_mode == ST_EXEC_MODE_CPE) && st_ses->stdev->is_gcs) {
+        if (st_ses->exec_mode == ST_EXEC_MODE_CPE) {
             payload_ptr = (uint8_t *)payload + 2;
             payload_size -= 2; /* Re-use */
-        } else if ((st_ses->exec_mode == ST_EXEC_MODE_ADSP) ||
-                   !st_ses->stdev->is_gcs) {
+        } else if (st_ses->exec_mode == ST_EXEC_MODE_ADSP) {
             payload_ptr = (uint8_t *)payload;
         } else {
             ALOGE("%s: Invalid execution mode, exiting", __func__);
@@ -3503,8 +4021,7 @@ static int process_detection_event_keyphrase(
     } else {
         if (st_ses->vendor_uuid_info->is_qcva_uuid ||
             st_ses->vendor_uuid_info->is_qcmd_uuid) {
-            if (st_ses->stdev->is_gcs &&
-                ST_EXEC_MODE_CPE == st_ses->exec_mode &&
+            if (ST_EXEC_MODE_CPE == st_ses->exec_mode &&
                 !st_hw_ses->is_generic_event) {
                 payload_ptr = payload;
                 payload_ptr += 2; /* Skip minor_version and num_active_models */
@@ -3642,7 +4159,7 @@ static inline int process_detection_event(st_proxy_session_t *st_ses,
     struct sound_trigger_phrase_recognition_event *phrase_event = NULL;
 
     *event = NULL;
-    if (st_ses->sm_info.sm_type == SOUND_MODEL_TYPE_KEYPHRASE) {
+    if (st_ses->det_stc_ses->sm_type == SOUND_MODEL_TYPE_KEYPHRASE) {
         if (sthw_extn_check_process_det_ev_support())
             ret = sthw_extn_process_detection_event_keyphrase(st_ses,
                 timestamp, detect_status, payload, payload_size, &phrase_event);
@@ -3937,11 +4454,81 @@ static void destroy_det_event_aggregator(st_proxy_session_t *st_ses)
     st_ses->aggregator_thread_created = false;
 }
 
+static int init_st_hw_config(st_hw_session_t *hw_ses, uint32_t model_id)
+{
+    struct st_hw_ses_config *sthw_cfg = NULL;
+    int status;
+
+    sthw_cfg = get_sthw_cfg_for_model_id(hw_ses, model_id);
+    if (sthw_cfg) {
+        ALOGD("%s: Already initialized sthw_cfg with m_id[%d]",
+            __func__, model_id);
+        return 0;
+    }
+
+    sthw_cfg = calloc(1, sizeof(struct st_hw_ses_config));
+    if (!sthw_cfg) {
+        ALOGE("%s: Failed to allocate struct st_hw_ses_config, exiting",
+            __func__);
+        return -ENOMEM;
+    }
+    sthw_cfg->model_id = model_id;
+
+    if (hw_ses->f_stage_version == ST_MODULE_TYPE_PDK5) {
+        sthw_cfg->conf_levels = calloc(1, MAX_MULTI_SM_CONF_LEVELS);
+        if (!sthw_cfg->conf_levels) {
+            ALOGE("%s: Failed to allocate conf_levels, exiting",
+                __func__);
+            status = -ENOMEM;
+            goto exit;
+        }
+        memset(sthw_cfg->conf_levels, MAX_CONF_LEVEL_VALUE,
+            MAX_MULTI_SM_CONF_LEVELS);
+    }
+
+    list_add_tail(&hw_ses->sthw_cfg_list,
+        &sthw_cfg->sthw_cfg_list_node);
+
+    return 0;
+
+exit:
+    if (sthw_cfg) {
+        free(sthw_cfg);
+        sthw_cfg = NULL;
+    }
+    return status;
+}
+
+static int deinit_st_hw_config(st_hw_session_t *hw_ses, uint32_t model_id)
+{
+    struct st_hw_ses_config *sthw_cfg = NULL;
+
+    sthw_cfg = get_sthw_cfg_for_model_id(hw_ses, model_id);
+    if (!sthw_cfg) {
+        ALOGE("%s: Unexpected, no matching sthw_cfg", __func__);
+        return -EINVAL;
+    }
+
+    if (hw_ses->f_stage_version == ST_MODULE_TYPE_PDK5 &&
+        sthw_cfg->conf_levels) {
+        free(sthw_cfg->conf_levels);
+        sthw_cfg->conf_levels = NULL;
+    }
+
+    list_remove(&sthw_cfg->sthw_cfg_list_node);
+    free(sthw_cfg);
+    sthw_cfg = NULL;
+
+    return 0;
+}
+
 /* This function is called for multi-client */
 static int handle_load_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
 {
     st_hw_session_t *hw_ses = st_ses->hw_ses_current;
     st_proxy_session_state_fn_t curr_state = st_ses->current_state;
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
+    struct st_hw_ses_config *sthw_cfg = NULL;
     int status = 0;
 
     ALOGV("%s:[c%d-%d]", __func__, stc_ses->sm_handle, st_ses->sm_handle);
@@ -3970,10 +4557,12 @@ static int handle_load_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
         STATE_TRANSITION(st_ses, loaded_state_fn);
     }
 
-    status = hw_ses->fptrs->dereg_sm(hw_ses);
-    if (status) {
-        ALOGE("%s:[%d] dereg_sm failed %d", __func__,
-            st_ses->sm_handle, status);
+    if (st_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
+        status = hw_ses->fptrs->dereg_sm(hw_ses, 0);
+        if (status) {
+            ALOGE("%s:[%d] dereg_sm failed %d", __func__,
+                st_ses->sm_handle, status);
+        }
     }
     /* Continue updating sound model resulting in merged model */
     status = update_sound_model(stc_ses, true);
@@ -3982,20 +4571,40 @@ static int handle_load_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
               stc_ses->sm_handle, status);
         goto exit;
     }
-    hw_ses->sthw_cfg.conf_levels = st_ses->sm_info.cf_levels;
-    hw_ses->sthw_cfg.num_conf_levels = st_ses->sm_info.cf_levels_size;
-    hw_ses->sthw_cfg_updated = true;
-    /*
-     * Sound model merge would have changed the order of merge conf levels,
-     * which need to be re-updated for all current active clients, if any.
-     */
-    status = update_merge_conf_levels_payload_with_active_clients(st_ses);
-    if (status)
-        goto exit_1;
 
-    /* Load merged sound model */
-    status = hw_ses->fptrs->reg_sm(hw_ses, st_ses->sm_info.sm_data,
-            st_ses->sm_info.sm_size, st_ses->sm_info.sm_type);
+    p_info = get_sm_info_for_model_id(st_ses, stc_ses->sm_info.model_id);
+    if (!p_info) {
+        ALOGE("%s: Unexpected, no matching sm_info" , __func__);
+        status = -EINVAL;
+        goto exit_1;
+    }
+
+    if (st_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
+        sthw_cfg = get_sthw_cfg_for_model_id(hw_ses, 0);
+        if (!sthw_cfg) {
+            ALOGE("%s: Unexpected, no matching sthw_cfg", __func__);
+            status = -EINVAL;
+            goto exit_1;
+        }
+
+        sthw_cfg->conf_levels = p_info->sm_info.cf_levels;
+        sthw_cfg->num_conf_levels = p_info->sm_info.cf_levels_size;
+        /*
+         * Sound model merge would have changed the order of merge conf levels,
+         * which need to be re-updated for all current active clients, if any.
+         */
+        status = update_merge_conf_levels_payload_with_active_clients(st_ses);
+        if (status)
+            goto exit_1;
+    } else {
+        status = init_st_hw_config(hw_ses, stc_ses->sm_info.model_id);
+        if (status)
+            goto exit_1;
+    }
+    hw_ses->sthw_cfg_updated = true;
+
+    status = hw_ses->fptrs->reg_sm(hw_ses, p_info->sm_info.sm_data,
+        p_info->sm_info.sm_size, p_info->sm_info.model_id);
     if (status) {
         ALOGE("%s:[%d] reg_sm failed %d", __func__,
             st_ses->sm_handle, status);
@@ -4016,16 +4625,18 @@ static int handle_load_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
 
 exit_2:
     if (!st_ses->stdev->ssr_offline_received)
-        hw_ses->fptrs->dereg_sm(hw_ses);
+        hw_ses->fptrs->dereg_sm(hw_ses, p_info->sm_info.model_id);
 
 exit_1:
     if (!st_ses->stdev->ssr_offline_received) {
         update_sound_model(stc_ses, false);
-        update_merge_conf_levels_payload_with_active_clients(st_ses);
+        if (st_ses->f_stage_version == ST_MODULE_TYPE_GMM)
+            update_merge_conf_levels_payload_with_active_clients(st_ses);
     }
 
 exit:
     if (st_ses->stdev->ssr_offline_received) {
+        dereg_all_sm(st_ses, hw_ses);
         STATE_TRANSITION(st_ses, ssr_state_fn);
         status = 0;
     }
@@ -4037,6 +4648,8 @@ static int handle_unload_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
 {
     st_hw_session_t *hw_ses = st_ses->hw_ses_current;
     st_proxy_session_state_fn_t curr_state = st_ses->current_state;
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
+    struct st_hw_ses_config *sthw_cfg = NULL;
     int status = 0;
 
     ALOGV("%s:[c%d-%d]", __func__, stc_ses->sm_handle, st_ses->sm_handle);
@@ -4060,7 +4673,7 @@ static int handle_unload_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
         STATE_TRANSITION(st_ses, loaded_state_fn);
     }
 
-    status = hw_ses->fptrs->dereg_sm(hw_ses);
+    status = hw_ses->fptrs->dereg_sm(hw_ses, stc_ses->sm_info.model_id);
     if (status)
         ALOGE("%s:[%d] dereg_sm failed %d", __func__, st_ses->sm_handle, status);
 
@@ -4070,23 +4683,43 @@ static int handle_unload_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
         ALOGE("%s:[c%d] update_sound_model delete failed %d", __func__,
             stc_ses->sm_handle, status);
 
-    hw_ses->sthw_cfg.conf_levels = st_ses->sm_info.cf_levels;
-    hw_ses->sthw_cfg.num_conf_levels = st_ses->sm_info.cf_levels_size;
-    hw_ses->sthw_cfg_updated = true;
-    /*
-     * Sound model merge would have changed the order of merge conf levels,
-     * which need to be re-updated for all current active clients, if any.
-     */
-    update_merge_conf_levels_payload_with_active_clients(st_ses);
+    if (st_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
+        p_info = get_sm_info_for_model_id(st_ses, 0);
+        if (!p_info) {
+            ALOGE("%s: Unexpected, no matching sm_info" , __func__);
+            status = -EINVAL;
+            goto exit;
+        }
 
-    /* Load remaining merged sound model */
-    status = hw_ses->fptrs->reg_sm(hw_ses, st_ses->sm_info.sm_data,
-        st_ses->sm_info.sm_size, st_ses->sm_info.sm_type);
-    if (status) {
-        ALOGE("%s:[%d] reg_sm failed %d", __func__,
-            st_ses->sm_handle, status);
-        goto exit;
+        sthw_cfg = get_sthw_cfg_for_model_id(hw_ses, 0);
+        if (!sthw_cfg) {
+            ALOGE("%s: Unexpected, no matching sthw_cfg", __func__);
+            status = -EINVAL;
+            goto exit;
+        }
+
+        sthw_cfg->conf_levels = p_info->sm_info.cf_levels;
+        sthw_cfg->num_conf_levels = p_info->sm_info.cf_levels_size;
+        /*
+         * Sound model merge would have changed the order of merge conf levels,
+         * which need to be re-updated for all current active clients, if any.
+         */
+        update_merge_conf_levels_payload_with_active_clients(st_ses);
+
+        /* Load remaining merged sound model */
+        status = hw_ses->fptrs->reg_sm(hw_ses, p_info->sm_info.sm_data,
+            p_info->sm_info.sm_size, 0);
+        if (status) {
+            ALOGE("%s:[%d] reg_sm failed %d", __func__,
+                st_ses->sm_handle, status);
+            goto exit;
+        }
+    } else {
+        status = deinit_st_hw_config(hw_ses, stc_ses->sm_handle);
+        if (status)
+            goto exit;
     }
+    hw_ses->sthw_cfg_updated = true;
 
     if (curr_state == active_state_fn ||
         curr_state == detected_state_fn ||
@@ -4101,6 +4734,8 @@ static int handle_unload_sm(st_proxy_session_t *st_ses, st_session_t *stc_ses)
 
 exit:
     if (st_ses->stdev->ssr_offline_received) {
+        if (st_ses->f_stage_version == ST_MODULE_TYPE_PDK5)
+            dereg_all_sm(st_ses, hw_ses);
         STATE_TRANSITION(st_ses, ssr_state_fn);
         status = 0;
     }
@@ -4113,6 +4748,7 @@ static int idle_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
     int ret = 0;
     st_session_t *stc_ses = ev->stc_ses;
     st_hw_session_t *hw_ses = st_ses->hw_ses_current;
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
 
     /* skip parameter check as this is an internal funciton */
     ALOGD("%s:[c%d-%d] handle event id %d", __func__, stc_ses->sm_handle,
@@ -4133,6 +4769,20 @@ static int idle_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             break;
         }
 
+        p_info = get_sm_info_for_model_id(st_ses, stc_ses->sm_info.model_id);
+        if (!p_info) {
+            ALOGE("%s: Unexpected, no matching sm_info" , __func__);
+            status = -EINVAL;
+            break;
+        }
+
+        status = init_st_hw_config(hw_ses, p_info->sm_info.model_id);
+        if (status) {
+            ALOGE("%s:[%d] failed to init sthw_cfg, exiting",
+                      __func__, st_ses->sm_handle);
+            break;
+        }
+
         /*
          * Do retry to handle a corner case that when ADSP SSR ONLINE is
          * received, sometimes ADSP is still not ready to receive cmd from HLOS
@@ -4140,8 +4790,12 @@ static int idle_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
          * state.
          */
         for (int i = 0; i < REG_SM_RETRY_CNT; i++) {
-            status = ret = hw_ses->fptrs->reg_sm(hw_ses, st_ses->sm_info.sm_data,
-                st_ses->sm_info.sm_size, st_ses->sm_info.sm_type);
+            if (stc_ses->pending_load)
+                status = ret = reg_all_sm(st_ses, hw_ses);
+            else
+                status = ret = hw_ses->fptrs->reg_sm(hw_ses, p_info->sm_info.sm_data,
+                    p_info->sm_info.sm_size, p_info->sm_info.model_id);
+
             if (ret) {
                 if (st_ses->stdev->ssr_offline_received) {
                     STATE_TRANSITION(st_ses, ssr_state_fn);
@@ -4156,6 +4810,7 @@ static int idle_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
                 break;
             }
         }
+
         if (ret)
             break;
 
@@ -4218,6 +4873,7 @@ static int loaded_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
     st_hw_session_t *hw_ses = st_ses->hw_ses_current;
     st_hw_session_t *new_hw_ses = NULL;
     st_exec_mode_t new_exec_mode = 0;
+    struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
 
     /* skip parameter check as this is an internal function */
     ALOGD("%s:[c%d-%d] handle event id %d", __func__, stc_ses->sm_handle,
@@ -4235,7 +4891,7 @@ static int loaded_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             break;
         }
 
-        status = hw_ses->fptrs->dereg_sm(hw_ses);
+        status = hw_ses->fptrs->dereg_sm(hw_ses, stc_ses->sm_info.model_id);
         if (status)
             ALOGE("%s:[%d] dereg_sm failed %d", __func__,
                 st_ses->sm_handle, status);
@@ -4244,6 +4900,11 @@ static int loaded_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
         if (status)
             ALOGE("%s:[c%d] update_sound_model failed %d", __func__,
                 stc_ses->sm_handle, status);
+
+        status = deinit_st_hw_config(hw_ses, stc_ses->sm_info.model_id);
+        if (status)
+            ALOGE("%s:[c%d] failed to deinit sthw_cfg",
+                __func__, stc_ses->sm_handle);
 
         /* since this is a teardown scenario dont fail here */
         status = 0;
@@ -4264,18 +4925,18 @@ static int loaded_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
                 hw_ses->lpi_enable = hw_ses->stdev->lpi_enable;
                 hw_ses->barge_in_mode = hw_ses->stdev->barge_in_mode;
 
-                status = hw_ses->fptrs->dereg_sm(hw_ses);
+                status = dereg_all_sm(st_ses, hw_ses);
                 if (status) {
                     ALOGE("%s:[%d] failed to dereg_sm err %d", __func__,
                         st_ses->sm_handle, status);
                     break;
                 }
 
-                status = hw_ses->fptrs->reg_sm(hw_ses, st_ses->sm_info.sm_data,
-                    st_ses->sm_info.sm_size, st_ses->sm_info.sm_type);
+                status = reg_all_sm(st_ses, hw_ses);
                 if (status) {
                     ALOGE("%s:[%d] failed to reg_sm err %d", __func__,
                         st_ses->sm_handle, status);
+                    dereg_all_sm(st_ses, hw_ses);
                     STATE_TRANSITION(st_ses, idle_state_fn);
                 }
             }
@@ -4298,7 +4959,7 @@ static int loaded_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
         status = start_session(st_ses, hw_ses, false);
         if (status) {
             if (st_ses->stdev->ssr_offline_received) {
-                hw_ses->fptrs->dereg_sm(hw_ses);
+                dereg_all_sm(st_ses, hw_ses);
                 STATE_TRANSITION(st_ses, ssr_state_fn);
                 status = 0;
             } else {
@@ -4322,7 +4983,7 @@ static int loaded_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
     case ST_SES_EV_SSR_OFFLINE:
         /* exec mode can be none if ssr occurs during a transition */
         if (st_ses->exec_mode != ST_EXEC_MODE_NONE)
-            hw_ses->fptrs->dereg_sm(hw_ses);
+            dereg_all_sm(st_ses, hw_ses);
         STATE_TRANSITION(st_ses, ssr_state_fn);
         break;
 
@@ -4345,7 +5006,7 @@ static int loaded_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
                 c_ses->exec_mode = ST_EXEC_MODE_NONE;
             }
             /* unload sm for current hw session */
-            status = hw_ses->fptrs->dereg_sm(hw_ses);
+            status = hw_ses->fptrs->dereg_sm(hw_ses, 0);
             if (status) {
                 ALOGE("%s:[%d] dereg_sm failed with err %d", __func__,
                     st_ses->sm_handle, status);
@@ -4368,9 +5029,15 @@ static int loaded_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             break;
         }
 
+        p_info = get_sm_info_for_model_id(st_ses, 0);
+        if (!p_info) {
+            ALOGE("%s: Unexpected, no matching sm_info" , __func__);
+            status = -EINVAL;
+            break;
+        }
+
         status = new_hw_ses->fptrs->reg_sm(new_hw_ses,
-            st_ses->sm_info.sm_data, st_ses->sm_info.sm_size,
-            st_ses->sm_info.sm_type);
+            p_info->sm_info.sm_data, p_info->sm_info.sm_size, 0);
         if (status) {
             ALOGE("%s:[%d] reg_sm failed with err %d", __func__,
                 st_ses->sm_handle, status);
@@ -4492,7 +5159,7 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
                 st_ses->sm_handle, status);
         }
         if (status & st_ses->stdev->ssr_offline_received) {
-            hw_ses->fptrs->dereg_sm(hw_ses);
+            dereg_all_sm(st_ses, hw_ses);
             STATE_TRANSITION(st_ses, ssr_state_fn);
             status = 0;
         }
@@ -4578,7 +5245,7 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
         if (status) {
             if (st_ses->stdev->ssr_offline_received) {
                 STATE_TRANSITION(st_ses, ssr_state_fn);
-                hw_ses->fptrs->dereg_sm(hw_ses);
+                dereg_all_sm(st_ses, hw_ses);
                 status = 0;
             } else {
                 ALOGE("%s:[%d] failed to stop session, err %d", __func__,
@@ -4589,6 +5256,11 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             break;
         }
         STATE_TRANSITION(st_ses, loaded_state_fn);
+        break;
+
+    case ST_SES_EV_RESUME:
+        if (stc_ses->paused == true)
+            stc_ses->paused = false;
         break;
 
     case ST_SES_EV_STOP:
@@ -4616,7 +5288,7 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
 
         if (status) {
             if (st_ses->stdev->ssr_offline_received) {
-                hw_ses->fptrs->dereg_sm(hw_ses);
+                dereg_all_sm(st_ses, hw_ses);
                 STATE_TRANSITION(st_ses, ssr_state_fn);
                 status = 0;
             } else {
@@ -4647,11 +5319,13 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
              */
             if (st_ses->lab_enabled)
                 hw_ses->fptrs->stop_buffering(hw_ses);
+            pthread_mutex_unlock(&st_ses->lock);
             break;
         }
         st_ses->det_stc_ses = stc_ses;
         st_ses->hw_ses_current->enable_second_stage = false; /* Initialize */
         stc_ses->detection_sent = false;
+        hw_ses->detected_preroll = stc_ses->preroll_duration;
 
         if (list_empty(&stc_ses->second_stage_list) ||
             st_ses->detection_requested) {
@@ -4672,6 +5346,7 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
                 hw_ses->fptrs->stop_buffering(hw_ses);
                 if (event)
                     free(event);
+                pthread_mutex_unlock(&st_ses->lock);
                 break;
             }
         } else {
@@ -4737,6 +5412,7 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             status = -EINVAL;
             if (event)
                 free(event);
+            pthread_mutex_unlock(&st_ses->lock);
             break;
         }
         /*
@@ -4753,15 +5429,22 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
                 __func__, stc_ses->sm_handle);
             ATRACE_ASYNC_END("sthal: detection success",
                 st_ses->sm_handle);
+            if (!lab_enabled) {
+                st_session_ev_t deferred_ev = {
+                    .ev_id = ST_SES_EV_DEFERRED_STOP,
+                    .stc_ses = stc_ses
+                };
+                DISPATCH_EVENT(st_ses, deferred_ev, status);
+            }
             pthread_mutex_unlock(&st_ses->lock);
             ATRACE_BEGIN("sthal: client detection callback");
             callback(event, cookie);
             ATRACE_END();
+            if (event)
+                free(event);
         } else {
             pthread_mutex_unlock(&st_ses->lock);
         }
-        if (event)
-            free(event);
 
         /*
          * TODO: Add RECOGNITION_STATUS_GET_STATE_RESPONSE to
@@ -4773,88 +5456,6 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
              (ev->payload.detected.detect_status == 3))) {
             /* Cache lab data to internal buffers (blocking call) */
             hw_ses->fptrs->process_lab_capture(hw_ses);
-        }
-
-        /*
-         * It is possible that the client may start/stop/unload the session
-         * with the same lock held, before we aqcuire lock here.
-         * We need further processing only if client starts in detected state
-         * or buffering state if lab was enabled, else return gracefully.
-         * For multi-client scenario, only one client is assumed to be
-         * detected/bufffering, so the logic remains same.
-         */
-         do {
-             status = pthread_mutex_trylock(&st_ses->lock);
-         } while (status && ((st_ses->current_state == detected_state_fn) ||
-                  (st_ses->current_state == buffering_state_fn)) &&
-                  !st_ses->stdev->ssr_offline_received);
-
-        if (st_ses->current_state != detected_state_fn) {
-            ALOGV("%s:[%d] client not in detected state, lock status %d",
-                __func__, st_ses->sm_handle, status);
-            if (!status) {
-                /*
-                 * If detection is sent to client while in buffering state,
-                 * and if internal buffering is stopped due to errors, stop
-                 * session internally as client is expected to restart the
-                 * detection if required.
-                 * Note: It is possible that detection event is not sent to
-                 * client if second stage is not yet detected during internal
-                 * buffering stop, in which case restart is posted from second
-                 * stage thread for further detections. Only if the second
-                 * stage detection hasn't be started due to internal buffering
-                 * stop too early, restart session should be explictily issued.
-                 */
-                if (st_ses->current_state == buffering_state_fn) {
-                    if (stc_ses->detection_sent) {
-                        if (!stc_ses->pending_stop) {
-                            ALOGD("%s:[%d] buffering stopped internally, post c%d stop",
-                                __func__, st_ses->sm_handle,
-                                st_ses->det_stc_ses->sm_handle);
-                            status = hw_session_notifier_enqueue(stc_ses->sm_handle,
-                                ST_SES_EV_DEFERRED_STOP,
-                                ST_SES_DEFERRED_STOP_SS_DELAY_MS);
-                            if (!status)
-                                stc_ses->pending_stop = true;
-                        }
-                    } else {
-                        list_for_each(node, &stc_ses->second_stage_list) {
-                            st_sec_stage = node_to_item(node, st_arm_second_stage_t,
-                                                        list_node);
-                            if (!st_sec_stage->ss_session->start_processing) {
-                                st_session_ev_t ev = {.ev_id = ST_SES_EV_RESTART,
-                                                      .stc_ses = stc_ses};
-                                DISPATCH_EVENT(st_ses, ev, status);
-                                break;
-                            }
-                        }
-                    }
-                }
-                pthread_mutex_unlock(&st_ses->lock);
-            }
-            status = 0;
-            break;
-        }
-
-        /*
-         * If we are not buffering (i.e capture is not requested), then
-         * trigger a deferred stop. Most applications issue (re)start
-         * almost immediately. Delaying stop allows unnecessary teardown
-         * and reinitialization of backend.
-         */
-        if (!lab_enabled) {
-            /*
-             * Note that this event will only be posted to the detected state
-             * The current state may switch to active if the client
-             * issues start/restart before control of the callback thread
-             * reaches this point.
-             */
-            st_session_ev_t deferred_ev = { .ev_id = ST_SES_EV_DEFERRED_STOP,
-                .stc_ses = stc_ses};
-            DISPATCH_EVENT(st_ses, deferred_ev, status);
-        } else {
-            ALOGE("%s:[%d] capture is requested but state is still detected!?",
-                __func__, st_ses->sm_handle);
         }
         break;
 
@@ -5183,6 +5784,15 @@ static int buffering_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
         }
         break;
 
+    case ST_SES_EV_DEFERRED_STOP:
+        ALOGD("%s:[%d] post internal deferred stop from buffering state",
+            __func__, st_ses->sm_handle);
+        status = hw_session_notifier_enqueue(stc_ses->sm_handle,
+            ST_SES_EV_DEFERRED_STOP, ST_SES_DEFERRED_STOP_DELAY_MS);
+        if (!status)
+            stc_ses->pending_stop = true;
+        break;
+
     case ST_SES_EV_STOP:
          ALOGD("%s:[c%d-%d] handle event STOP", __func__, stc_ses->sm_handle,
              st_ses->sm_handle);
@@ -5206,17 +5816,10 @@ static int buffering_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             st_ses->sm_handle);
         /*
          * Device switch will not wait for buffering to finish. It will instead
-         * interrupt and stop the buffering and transition to the loaded state.
-         * The loaded state will then take care of the device switch.
+         * interrupt and stop the buffering and transition to the active state.
          */
         hw_ses->fptrs->stop_buffering(hw_ses);
-        status = stop_session(st_ses, hw_ses, false);
-        if (status && !st_ses->stdev->ssr_offline_received) {
-            ALOGE("%s:[%d] failed to stop session, err %d", __func__,
-                  st_ses->sm_handle, status);
-            break;
-        }
-        STATE_TRANSITION(st_ses, loaded_state_fn);
+        STATE_TRANSITION(st_ses, active_state_fn);
         DISPATCH_EVENT(st_ses, *ev, status);
 
         /*
@@ -5231,7 +5834,7 @@ static int buffering_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
                 ST_SES_EV_DEFERRED_STOP);
             stc_ses->pending_stop = false;
         }
-        st_ses->det_stc_ses->state = ST_STATE_LOADED;
+        st_ses->det_stc_ses->state = ST_STATE_ACTIVE;
         break;
 
     case ST_SES_EV_START:
@@ -5260,6 +5863,7 @@ static int buffering_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
         hw_ses->fptrs->stop_buffering(hw_ses);
         if (hw_ses->sthw_cfg_updated || ev->ev_id == ST_SES_EV_START) {
             status = stop_session(st_ses, hw_ses, false);
+            STATE_TRANSITION(st_ses, loaded_state_fn);
             if (status) {
                 ALOGE("%s:[%d] failed to stop session, err %d", __func__,
                     st_ses->sm_handle, status);
@@ -5276,7 +5880,7 @@ static int buffering_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
 
         if (status) {
             if (st_ses->stdev->ssr_offline_received) {
-                hw_ses->fptrs->dereg_sm(hw_ses);
+                dereg_all_sm(st_ses, hw_ses);
                 STATE_TRANSITION(st_ses, ssr_state_fn);
                 status = 0;
             } else {
@@ -5431,8 +6035,6 @@ static int ssr_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
         if (is_any_client_not_pending_load(st_ses))
             break;
 
-        reset_clients_pending_load(st_ses);
-
         STATE_TRANSITION(st_ses, idle_state_fn);
 
         if ((stc_ses->ssr_transit_exec_mode == ST_EXEC_MODE_CPE) ||
@@ -5440,22 +6042,27 @@ static int ssr_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             exec_mode_ev.stc_ses = stc_ses;
             exec_mode_ev.payload.exec_mode = stc_ses->ssr_transit_exec_mode;
             DISPATCH_EVENT(st_ses, exec_mode_ev, status);
-            if (status)
+            if (status) {
+                reset_clients_pending_load(st_ses);
                 break;
+            }
             stc_ses->ssr_transit_exec_mode = ST_EXEC_MODE_NONE;
         }
         active = is_any_client_in_state(st_ses, ST_STATE_ACTIVE);
         if (active || is_any_client_in_state(st_ses, ST_STATE_LOADED)) {
             load_ev.stc_ses = stc_ses;
             DISPATCH_EVENT(st_ses, load_ev, status);
-            if (status)
+            if (status) {
+                reset_clients_pending_load(st_ses);
                 break;
+            }
         }
         if (active) {
             start_ev.stc_ses = stc_ses;
             DISPATCH_EVENT(st_ses, start_ev, status);
         }
 
+        reset_clients_pending_load(st_ses);
         break;
 
     case ST_SES_EV_LOAD_SM:
@@ -6011,7 +6618,7 @@ int st_session_get_preroll(st_session_t *stc_ses)
     st_proxy_session_t *st_ses = stc_ses->hw_proxy_ses;
 
     pthread_mutex_lock(&st_ses->lock);
-    val = st_ses->hw_ses_current->sthw_cfg.client_req_preroll;
+    val = st_ses->hw_ses_current->max_preroll;
     pthread_mutex_unlock(&st_ses->lock);
 
     return val;
@@ -6205,70 +6812,38 @@ int st_session_init(st_session_t *stc_ses, struct sound_trigger_device *stdev,
 
     if (v_info && (EXEC_MODE_CFG_DYNAMIC == v_info->exec_mode_cfg)) {
         st_ses->enable_trans = true;
-        if (stdev->is_gcs) {
             /* alloc and init cpe session*/
-            st_ses->hw_ses_cpe =
-                (st_hw_session_t *)calloc(1, sizeof(st_hw_session_gcs_t));
-            if (!st_ses->hw_ses_cpe) {
-                status = -ENOMEM;
-                goto cleanup;
-            }
-            status = st_hw_sess_gcs_init(st_ses->hw_ses_cpe, hw_sess_cb,
-                (void *)st_ses, ST_EXEC_MODE_CPE, v_info, sm_handle, stdev);
-            if (status) {
-                ALOGE("%s: initializing gcs hw session failed %d", __func__,
-                    status);
-                goto cleanup;
-            }
-
-            /* alloc and init adsp session*/
-            st_ses->hw_ses_adsp =
-                (st_hw_session_t *)calloc(1, sizeof(st_hw_session_lsm_t));
-            if (!st_ses->hw_ses_adsp) {
-                st_hw_sess_gcs_deinit(st_ses->hw_ses_cpe);
-                status = -ENOMEM;
-                goto cleanup;
-            }
-
-            status = st_hw_sess_lsm_init(st_ses->hw_ses_adsp, hw_sess_cb,
-                (void *)st_ses, ST_EXEC_MODE_ADSP, v_info, sm_handle, stdev);
-            if (status) {
-                ALOGE("%s: initializing lsm session failed", __func__);
-                st_hw_sess_gcs_deinit(st_ses->hw_ses_cpe);
-                goto cleanup;
-            }
-
-        } else {
-            /* alloc and init cpe session*/
-            st_ses->hw_ses_cpe =
-                (st_hw_session_t *)calloc(1, sizeof(st_hw_session_lsm_t));
-            if (!st_ses->hw_ses_cpe) {
-                status = -ENOMEM;
-                goto cleanup;
-            }
-            status = st_hw_sess_lsm_init(st_ses->hw_ses_cpe, hw_sess_cb,
-                (void *)st_ses, ST_EXEC_MODE_CPE, v_info, sm_handle, stdev);
-            if (status) {
-                ALOGE("%s: initialzing lsm hw session failed %d", __func__,
-                    status);
-                goto cleanup;
-            }
-            /* alloc and init adsp session*/
-            st_ses->hw_ses_adsp =
-                (st_hw_session_t *)calloc(1, sizeof(st_hw_session_lsm_t));
-            if (!st_ses->hw_ses_adsp) {
-                status = -ENOMEM;
-                st_hw_sess_lsm_deinit(st_ses->hw_ses_cpe);
-                goto cleanup;
-            }
-            status = st_hw_sess_lsm_init(st_ses->hw_ses_adsp, hw_sess_cb,
-                (void *)st_ses, ST_EXEC_MODE_ADSP, v_info, sm_handle, stdev);
-            if (status) {
-                ALOGE("%s: initializing lsm session failed", __func__);
-                st_hw_sess_lsm_deinit(st_ses->hw_ses_cpe);
-                goto cleanup;
-            }
+        st_ses->hw_ses_cpe =
+            (st_hw_session_t *)calloc(1, sizeof(st_hw_session_gcs_t));
+        if (!st_ses->hw_ses_cpe) {
+            status = -ENOMEM;
+            goto cleanup;
         }
+        status = st_hw_sess_gcs_init(st_ses->hw_ses_cpe, hw_sess_cb,
+            (void *)st_ses, ST_EXEC_MODE_CPE, v_info, sm_handle, stdev);
+        if (status) {
+            ALOGE("%s: initializing gcs hw session failed %d", __func__,
+                status);
+            goto cleanup;
+        }
+
+        /* alloc and init adsp session*/
+        st_ses->hw_ses_adsp =
+            (st_hw_session_t *)calloc(1, sizeof(st_hw_session_lsm_t));
+        if (!st_ses->hw_ses_adsp) {
+            st_hw_sess_gcs_deinit(st_ses->hw_ses_cpe);
+            status = -ENOMEM;
+            goto cleanup;
+        }
+
+        status = st_hw_sess_lsm_init(st_ses->hw_ses_adsp, hw_sess_cb,
+            (void *)st_ses, ST_EXEC_MODE_ADSP, v_info, sm_handle, stdev);
+        if (status) {
+            ALOGE("%s: initializing lsm session failed", __func__);
+            st_hw_sess_gcs_deinit(st_ses->hw_ses_cpe);
+            goto cleanup;
+        }
+
         /* set current hw_session */
         if (exec_mode == ST_EXEC_MODE_CPE)
             st_ses->hw_ses_current = st_ses->hw_ses_cpe;
@@ -6276,81 +6851,93 @@ int st_session_init(st_session_t *stc_ses, struct sound_trigger_device *stdev,
             st_ses->hw_ses_current = st_ses->hw_ses_adsp;
     } else if (v_info && (EXEC_MODE_CFG_CPE == v_info->exec_mode_cfg)) {
         st_ses->enable_trans = false;
-        if (stdev->is_gcs) {
-            ALOGD("%s: initializing gcs hw session", __func__);
-            st_ses->hw_ses_cpe =
-                (st_hw_session_t *)calloc(1, sizeof(st_hw_session_gcs_t));
-            if (!st_ses->hw_ses_cpe) {
-                status = -ENOMEM;
-                goto cleanup;
-            }
-            status = st_hw_sess_gcs_init(st_ses->hw_ses_cpe, hw_sess_cb,
-                (void *)st_ses, exec_mode, v_info, sm_handle, stdev);
-            if (status) {
-                ALOGE("%s: initializing gcs hw session failed %d",
-                    __func__, status);
-                goto cleanup;
-            }
-        } else {
-            st_ses->hw_ses_cpe =
-                (st_hw_session_t *)calloc(1, sizeof(st_hw_session_lsm_t));
-            if (!st_ses->hw_ses_cpe) {
-                status = -ENOMEM;
-                goto cleanup;
-            }
-            status = st_hw_sess_lsm_init(st_ses->hw_ses_cpe, hw_sess_cb,
-                (void *)st_ses, exec_mode, v_info, sm_handle, stdev);
-            if (status) {
-                ALOGE("%s: initializing lsm hw session failed %d",
-                    __func__, status);
-                goto cleanup;
-            }
+
+        ALOGD("%s: initializing gcs hw session", __func__);
+        st_ses->hw_ses_cpe =
+            (st_hw_session_t *)calloc(1, sizeof(st_hw_session_gcs_t));
+        if (!st_ses->hw_ses_cpe) {
+            status = -ENOMEM;
+            goto cleanup;
         }
+        status = st_hw_sess_gcs_init(st_ses->hw_ses_cpe, hw_sess_cb,
+            (void *)st_ses, exec_mode, v_info, sm_handle, stdev);
+        if (status) {
+            ALOGE("%s: initializing gcs hw session failed %d",
+                __func__, status);
+            goto cleanup;
+        }
+
         st_ses->hw_ses_current = st_ses->hw_ses_cpe;
     } else if (v_info && (EXEC_MODE_CFG_APE == v_info->exec_mode_cfg)) {
         /*
          * Check for merge sound model support and return the existing hw
          * session. If any other clients have already created it.
          */
-        if (v_info->merge_fs_soundmodels) {
+        if (v_info->merge_fs_soundmodels &&
+            stc_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
             if (!v_info->is_qcva_uuid) {
-               ALOGE("%s: merge sound model not supported for non SVA engines",
-                     __func__);
-               status = -ENOSYS;
-               goto cleanup;
+                ALOGE("%s: merge sound model not supported for non SVA engines",
+                    __func__);
+                status = -ENOSYS;
+                goto cleanup;
             }
             list_for_each(node, &stdev->sound_model_list) {
                 c_ses = node_to_item(node, st_session_t, list_node);
                 if ((c_ses != stc_ses) &&
                     c_ses->vendor_uuid_info->is_qcva_uuid &&
-                    c_ses->vendor_uuid_info->merge_fs_soundmodels) {
+                    c_ses->vendor_uuid_info->merge_fs_soundmodels &&
+                    c_ses->f_stage_version == ST_MODULE_TYPE_GMM) {
                     stc_ses->hw_proxy_ses = c_ses->hw_proxy_ses;
                     list_add_tail(&stc_ses->hw_proxy_ses->clients_list,
                         &stc_ses->hw_list_node);
-                    ALOGD("%s: another client attached: h%d <-- c%d", __func__,
-                        stc_ses->hw_proxy_ses->sm_handle, sm_handle);
+                    ALOGD("%s: another client attached, merge SM: h%d <-- c%d",
+                        __func__, stc_ses->hw_proxy_ses->sm_handle, sm_handle);
                     free(st_ses);
                     st_ses = NULL;
                     break;
                 }
             }
-         }
-         if (st_ses) { /* If no other client exist */
-             st_ses->hw_ses_adsp =
-                 (st_hw_session_t *)calloc(1, sizeof(st_hw_session_lsm_t));
-             if (!st_ses->hw_ses_adsp) {
-                 status = -ENOMEM;
-                 goto cleanup;
-             }
-             status = st_hw_sess_lsm_init(st_ses->hw_ses_adsp, hw_sess_cb,
-                (void *)st_ses, exec_mode, v_info, sm_handle, stdev);
-             if (status) {
-                 ALOGE("%s: initializing lsm hw session failed %d",
-                     __func__, status);
-                 goto cleanup;
-             }
-             st_ses->hw_ses_current = st_ses->hw_ses_adsp;
-         }
+        } else if (stc_ses->f_stage_version == ST_MODULE_TYPE_PDK5) {
+            if (!v_info->is_qcva_uuid) {
+                ALOGE("%s: multi sound model not supported for non SVA engines",
+                    __func__);
+                status = -ENOSYS;
+                goto cleanup;
+            }
+            list_for_each(node, &stdev->sound_model_list) {
+                c_ses = node_to_item(node, st_session_t, list_node);
+                if ((c_ses != stc_ses) &&
+                    c_ses->vendor_uuid_info->is_qcva_uuid &&
+                    c_ses->f_stage_version == ST_MODULE_TYPE_PDK5) {
+                    stc_ses->hw_proxy_ses = c_ses->hw_proxy_ses;
+                    list_add_tail(&stc_ses->hw_proxy_ses->clients_list,
+                        &stc_ses->hw_list_node);
+                    ALOGD("%s: another client attached, multi SM: h%d <-- c%d",
+                        __func__, stc_ses->hw_proxy_ses->sm_handle, sm_handle);
+                    free(st_ses);
+                    st_ses = NULL;
+                    break;
+                }
+            }
+        }
+        if (st_ses) { /* If no other client exist */
+            st_ses->hw_ses_adsp =
+                (st_hw_session_t *)calloc(1, sizeof(st_hw_session_lsm_t));
+            if (!st_ses->hw_ses_adsp) {
+                status = -ENOMEM;
+                goto cleanup;
+            }
+            status = st_hw_sess_lsm_init(st_ses->hw_ses_adsp, hw_sess_cb,
+               (void *)st_ses, exec_mode, v_info, sm_handle, stdev);
+            if (status) {
+                ALOGE("%s: initializing lsm hw session failed %d",
+                    __func__, status);
+                goto cleanup;
+            }
+            st_ses->hw_ses_current = st_ses->hw_ses_adsp;
+            st_ses->f_stage_version = stc_ses->f_stage_version;
+            st_ses->hw_ses_current->f_stage_version = stc_ses->f_stage_version;
+        }
     } else if (v_info && (EXEC_MODE_CFG_ARM == v_info->exec_mode_cfg)) {
         st_ses->enable_trans = false;
         st_ses->hw_ses_arm = calloc(1, sizeof(st_hw_session_pcm_t));
@@ -6400,6 +6987,7 @@ int st_session_init(st_session_t *stc_ses, struct sound_trigger_device *stdev,
         pthread_mutex_init(&st_ses->lock, (const pthread_mutexattr_t *)&attr);
 
         stc_ses->hw_proxy_ses = st_ses;
+        list_init(&st_ses->sm_info_list);
         list_init(&st_ses->clients_list);
         list_add_tail(&st_ses->clients_list, &stc_ses->hw_list_node);
         ALOGD("%s: client attached: h%d <-- c%d", __func__,
@@ -6442,10 +7030,7 @@ int st_session_deinit(st_session_t *stc_ses)
     }
     /* deinit cpe session */
     if (st_ses->hw_ses_cpe) {
-        if (st_ses->stdev->is_gcs)
-            st_hw_sess_gcs_deinit(st_ses->hw_ses_cpe);
-        else
-            st_hw_sess_lsm_deinit(st_ses->hw_ses_cpe);
+        st_hw_sess_gcs_deinit(st_ses->hw_ses_cpe);
         free(st_ses->hw_ses_cpe);
         st_ses->hw_ses_cpe = NULL;
     }

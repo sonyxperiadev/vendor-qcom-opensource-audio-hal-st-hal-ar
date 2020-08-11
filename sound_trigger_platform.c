@@ -64,6 +64,7 @@ typedef unsigned char __u8;
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sound/asound.h>
 #include <sound/msmcal-hwdep.h>
 #include <linux/msm_audio_calibration.h> /* for AUDIO_CORE_METAINFO_CAL_TYPE; audio_cal_info_metainfo */
 #include <sound/lsm_params.h>
@@ -80,7 +81,6 @@ typedef unsigned char __u8;
 #define ST_PARAM_KEY_SW_MAD "sw_mad"
 #define ST_PARAM_KEY_BG_KWD "bg_kwd"
 #define ST_PARAM_KEY_ENABLE_FAILURE_DETECTION "enable_failure_detection"
-#define ST_PARAM_KEY_CPE_FE_TO_BE_FIXED "cpe_fe_to_be_fixed"
 #define ST_PARAM_KEY_RX_CONCURRENCY_DISABLED "rx_concurrency_disabled"
 #define ST_PARAM_KEY_RX_MAX_CONC_SESSIONS "rx_conc_max_st_ses"
 #define ST_PARAM_KEY_CONCURRENT_CAPTURE "concurrent_capture"
@@ -92,6 +92,7 @@ typedef unsigned char __u8;
 #define ST_PARAM_KEY_SM_VENDOR_UUID "vendor_uuid"
 #define ST_PARAM_KEY_MERGE_FIRST_STAGE_SOUNDMODELS "merge_first_stage_sound_models"
 #define ST_PARAM_KEY_APP_TYPE "app_type"
+#define ST_PARAM_KEY_PDK5_APP_TYPE "pdk5_app_type"
 #define ST_PARAM_KEY_MAX_CPE_PHRASES "max_cpe_phrases"
 #define ST_PARAM_KEY_MAX_APE_USERS "max_ape_users"
 #define ST_PARAM_KEY_MAX_APE_PHRASES "max_ape_phrases"
@@ -105,6 +106,7 @@ typedef unsigned char __u8;
 #define ST_PARAM_KEY_OUT_CHANNELS "out_channels"
 #define ST_PARAM_KEY_ADM_CFG_PROFILE "adm_cfg_profile"
 #define ST_PARAM_KEY_CAPTURE_DEVICE "capture_device"
+#define ST_PARAM_KEY_MODULE_TYPE "module_type"
 #define ST_PARAM_KEY_LOAD_SOUND_MODEL_IDS "load_sound_model_ids"
 #define ST_PARAM_KEY_UNLOAD_SOUND_MODEL_IDS "unload_sound_model_ids"
 #define ST_PARAM_KEY_CONFIDENCE_LEVELS_IDS "confidence_levels_ids"
@@ -342,7 +344,8 @@ typedef enum {
     TAG_ADM_CFG,
     TAG_LPMA_CONFIG,
     TAG_ACDB_METAINFO_KEY,
-    TAG_LSM_SS_USECASE
+    TAG_LSM_SS_USECASE,
+    TAG_MODULE_PARAMS
 } st_xml_tags_t;
 
 typedef void (*st_xml_process_fn)(void *platform, const XML_Char **attr);
@@ -363,6 +366,7 @@ static st_xml_process_fn process_table[] = {
     [TAG_LPMA_CONFIG] = platform_stdev_process_kv_params,
     [TAG_ACDB_METAINFO_KEY] = process_stdev_acdb_metainfo_key,
     [TAG_LSM_SS_USECASE] = platform_stdev_process_kv_params,
+    [TAG_MODULE_PARAMS] = platform_stdev_process_kv_params,
 };
 
 #define ST_ACDB_METAINFO_KEY_MODULE_NAME_LEN (100)
@@ -398,7 +402,6 @@ struct platform_data {
     st_xml_tags_t st_xml_tag;
     struct str_parms *kvpairs;
 
-    bool cpe_fe_to_be_fixed;
     char codec_version[15];
 
     char backend_port[ST_BACKEND_PORT_NAME_MAX_SIZE];
@@ -413,7 +416,42 @@ struct platform_data {
 
     struct st_lpma_config lpma_cfg;
     struct listnode acdb_meta_key_list;
+
+    char vendor_config_path[MIXER_PATH_MAX_LENGTH];
+    char xml_file_path[MIXER_PATH_MAX_LENGTH];
 };
+
+
+/*
+ * Function to retrieve vendor configs path
+ *
+ * If 'ro.boot.product.vendor.sku' is not set,files would be loaded from
+ * /vendor/etc/. If the property is set, files would be loaded from
+ * /vendor/etc/audio/sku_{ro.boot.product.vendor.sku}.
+ * 'ro.boot.product.vendor.sku' would be set to SoC/SKU at boot up in vendor.
+*/
+static void platform_stdev_get_vendor_config_path(char* config_file_path, int path_size)
+{
+    char vendor_sku[PROPERTY_VALUE_MAX] = {'\0'};
+
+    if (property_get("ro.boot.product.vendor.sku", vendor_sku, "") <= 0) {
+#ifdef LINUX_ENABLED
+        /* Audio configs are stored in /etc */
+        snprintf(config_file_path, path_size, "%s", "/etc");
+#else
+        /* Audio configs are stored in /vendor/etc */
+        snprintf(config_file_path, path_size, "%s", "/vendor/etc");
+#endif
+    } else {
+        /* Audio configs are stored in /vendor/etc/audio/sku_${vendor_sku} */
+        snprintf(config_file_path, path_size,"%s%s", "/vendor/etc/audio/sku_", vendor_sku);
+    }
+}
+
+static void get_xml_file_path(char* path, const char* file_name, const char* vendor_path)
+{
+    snprintf(path, MIXER_PATH_MAX_LENGTH, "%s/%s", vendor_path, file_name);
+}
 
 static int load_soundmodel_lib(sound_trigger_device_t *stdev)
 {
@@ -567,39 +605,6 @@ static int load_mulaw_decoder(sound_trigger_device_t *stdev)
     return status;
 }
 
-static int load_adpcm_decoder(sound_trigger_device_t *stdev)
-{
-    int status = 0;
-
-    stdev->adpcm_dec_lib_handle = dlopen(LIB_ADPCM_DECODER, RTLD_NOW);
-    if (!stdev->adpcm_dec_lib_handle) {
-        ALOGE("%s: ERROR. %s", __func__, dlerror());
-        return -ENODEV;
-    }
-
-    DLSYM(stdev->adpcm_dec_lib_handle, stdev->adpcm_dec_init,
-          g722_init_decoder, status);
-    if (status)
-        goto cleanup;
-    DLSYM(stdev->adpcm_dec_lib_handle, stdev->adpcm_dec_get_scratch_size,
-          g722_dec_get_total_byte_size, status);
-    if (status)
-        goto cleanup;
-    DLSYM(stdev->adpcm_dec_lib_handle, stdev->adpcm_dec_process,
-          g722_dec_process, status);
-    if (status)
-        goto cleanup;
-
-    return 0;
-
-cleanup:
-    if (stdev->adpcm_dec_lib_handle) {
-        dlclose(stdev->adpcm_dec_lib_handle);
-        stdev->adpcm_dec_lib_handle = NULL;
-    }
-    return status;
-}
-
 static int platform_stdev_set_acdb_id(void *userdata __unused, const char* device, int acdb_id)
 {
     int i, j;
@@ -745,7 +750,6 @@ static void platform_stdev_set_default_config(struct platform_data *platform)
     stdev->support_dynamic_ec_update = true;
     stdev->ec_reset_pending_cnt = 0;
 
-    platform->cpe_fe_to_be_fixed = true;
     platform->bad_mic_channel_index = 0;
     platform->be_dai_name_table = NULL;
     platform->max_be_dai_names = 0;
@@ -902,11 +906,7 @@ static int platform_stdev_set_capture_keyword_config
         ret = -EINVAL;
         goto error_exit;
     }
-    if (!strcmp(id, "ADPCM_packet")) {
-        sm_info->kw_capture_format |= ADPCM_CUSTOM_PACKET;
-    } else if (!strcmp(id, "ADPCM_raw")) {
-        sm_info->kw_capture_format |= ADPCM_RAW;
-    } else if (!strcmp(id, "MULAW_raw")) {
+    if (!strcmp(id, "MULAW_raw")) {
         sm_info->kw_capture_format |= MULAW_RAW;
     } else if (!strcmp(id, "PCM_packet")) {
         sm_info->kw_capture_format |= PCM_CUSTOM_PACKET;
@@ -994,14 +994,6 @@ static int platform_set_common_config
     if (err >= 0) {
         str_parms_del(parms, ST_PARAM_KEY_ENABLE_FAILURE_DETECTION);
         stdev->detect_failure =
-            !strncasecmp(str_value, "true", 4) ? true : false;
-    }
-
-    err = str_parms_get_str(parms, ST_PARAM_KEY_CPE_FE_TO_BE_FIXED,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_CPE_FE_TO_BE_FIXED);
-        my_data->cpe_fe_to_be_fixed =
             !strncasecmp(str_value, "true", 4) ? true : false;
     }
 
@@ -2013,6 +2005,200 @@ err_exit:
     return ret;
 }
 
+static int platform_stdev_set_module_params
+(
+   void *platform,
+   struct str_parms *parms
+)
+{
+    struct platform_data *my_data = (struct platform_data *)platform;
+    char str_value[ST_MAX_STRING_PARAM_SIZE];
+    char *kv_pairs = str_parms_to_str(parms);
+    int ret = 0, err = 0;
+    struct listnode *sm_info_node = NULL, *lsm_params_node = NULL;
+    struct st_vendor_info *sm_info = NULL;
+    struct st_lsm_params *lsm_params = NULL;
+    struct st_module_params *module_params = NULL;
+
+    if (kv_pairs == NULL) {
+        ALOGE("%s: key-value pair is NULL", __func__);
+        return -EINVAL;
+    }
+    ALOGV("%s: %s", __func__, kv_pairs);
+
+    if (my_data->xml_version < PLATFORM_XML_VERSION_0x0106) {
+        ALOGE("%s: Unexpected platform xml version 0x%x, exiting", __func__,
+            my_data->xml_version);
+        return -EINVAL;
+    }
+
+    /* Get the last added vendor_info node */
+    sm_info_node = list_tail(&my_data->stdev->vendor_uuid_list);
+    if (sm_info_node) {
+        sm_info = node_to_item(sm_info_node, struct st_vendor_info, list_node);
+    } else {
+        ALOGE("%s: found NULL sm_info", __func__);
+        ret = -EINVAL;
+        goto err_exit;
+    }
+
+    /* Get the last added lsm_params node */
+    lsm_params_node = list_tail(&sm_info->lsm_usecase_list);
+    if (lsm_params_node) {
+        lsm_params = node_to_item(lsm_params_node, struct st_lsm_params,
+            list_node);
+    } else {
+        ALOGE("%s: found NULL lsm_params", __func__);
+        ret = -EINVAL;
+        goto err_exit;
+    }
+
+    module_params = calloc(1, sizeof(struct st_module_params));
+    if (!module_params) {
+        ALOGE("%s: module_params allocation failed", __func__);
+        ret = -ENOMEM;
+        goto err_exit;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_MODULE_TYPE,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_MODULE_TYPE);
+        if (!strncmp(str_value, "GMM", sizeof("GMM")))
+            module_params->type = ST_MODULE_TYPE_GMM;
+        else if (!strncmp(str_value, "PDK5", sizeof("PDK5")))
+            module_params->type = ST_MODULE_TYPE_PDK5;
+        else {
+            ALOGE("%s: Unknown module type, exiting", __func__);
+            ret = -EINVAL;
+            goto err_exit;
+        }
+    } else {
+        module_params->type = ST_MODULE_TYPE_GMM;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_LOAD_SOUND_MODEL_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_LOAD_SOUND_MODEL_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[LOAD_SOUND_MODEL], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_LOAD_SOUND_MODEL_BIT;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_UNLOAD_SOUND_MODEL_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_UNLOAD_SOUND_MODEL_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[UNLOAD_SOUND_MODEL], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_UNLOAD_SOUND_MODEL_BIT;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_REQUEST_DETECTION_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_REQUEST_DETECTION_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[REQUEST_DETECTION], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_REQUEST_DETECTION_BIT;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_LAB_DAM_CFG_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_LAB_DAM_CFG_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[LAB_DAM_CFG], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_LAB_DAM_CFG_BIT;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_CONFIDENCE_LEVELS_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_CONFIDENCE_LEVELS_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[CONFIDENCE_LEVELS], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_CONFIDENCE_LEVELS_BIT;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_OPERATION_MODE_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_OPERATION_MODE_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[OPERATION_MODE], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_OPERATION_MODE_BIT;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_POLLING_ENABLE_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_POLLING_ENABLE_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[POLLING_ENABLE], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_POLLING_ENABLE_BIT;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_CUSTOM_CONFIG_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_CUSTOM_CONFIG_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[CUSTOM_CONFIG], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_CUSTOM_CONFIG_BIT;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_DET_EVENT_TYPE_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_DET_EVENT_TYPE_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[DET_EVENT_TYPE], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_DET_EVENT_TYPE_BIT;
+    }
+
+    err = str_parms_get_str(parms, ST_PARAM_KEY_LAB_CONTROL_IDS,
+                            str_value, sizeof(str_value));
+    if (err >= 0) {
+        str_parms_del(parms, ST_PARAM_KEY_LAB_CONTROL_IDS);
+        ret = platform_stdev_set_module_param_ids(
+            &module_params->params[LAB_CONTROL], str_value, false);
+        if (ret)
+            goto err_exit;
+        module_params->param_tag_tracker |= PARAM_LAB_CONTROL_BIT;
+    }
+
+    list_add_tail(&lsm_params->module_params_list,
+        &module_params->list_node);
+    free(kv_pairs);
+    return 0;
+
+err_exit:
+    if (module_params)
+        free(module_params);
+    free(kv_pairs);
+    return ret;
+}
+
 static int platform_stdev_set_lsm_params
 (
    void *platform,
@@ -2023,9 +2209,11 @@ static int platform_stdev_set_lsm_params
     char str_value[ST_MAX_STRING_PARAM_SIZE];
     char *kv_pairs = str_parms_to_str(parms);
     int ret = 0, err = 0, value = 0;
-    struct listnode *sm_info_node = NULL;
+    struct listnode *sm_info_node = NULL, *module_node = NULL;
+    struct listnode *tmp_node = NULL, *lsm_params_node = NULL;
     struct st_vendor_info *sm_info = NULL;
     struct st_lsm_params *lsm_params = NULL;
+    struct st_module_params *module_params = NULL;
     st_exec_mode_t exec_mode = ST_EXEC_MODE_NONE;
     bool is_legacy_params = true;
     bool is_legacy_version = true;
@@ -2038,19 +2226,24 @@ static int platform_stdev_set_lsm_params
 
     /* Get the last added vendor_info node */
     sm_info_node = list_tail(&my_data->stdev->vendor_uuid_list);
-    if (sm_info_node) {
+    if (sm_info_node)
         sm_info = node_to_item(sm_info_node, struct st_vendor_info, list_node);
-    } else {
+
+    if (!sm_info) {
         ALOGE("%s: found NULL sm_info", __func__);
-        ret = -EINVAL;
-        goto err_exit;
+        free(kv_pairs);
+        return -EINVAL;
     }
 
-    lsm_params = calloc(1, sizeof(*lsm_params));
+    /* Get the last added lsm_params node */
+    lsm_params_node = list_tail(&sm_info->lsm_usecase_list);
+    if (lsm_params_node)
+        lsm_params = node_to_item(lsm_params_node, struct st_lsm_params, list_node);
+
     if (!lsm_params) {
-        ALOGE("%s: lsm_params allocation failed", __func__);
-        ret = -ENOMEM;
-        goto err_exit;
+        ALOGE("%s: found NULL lsm_params", __func__);
+        free(kv_pairs);
+        return -EINVAL;
     }
 
     err = str_parms_get_str(parms, ST_PARAM_KEY_EXECUTION_MODE,
@@ -2080,114 +2273,123 @@ static int platform_stdev_set_lsm_params
 
     ALOGV("%s: Process params for exec mode %x", __func__, exec_mode);
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_LOAD_SOUND_MODEL_IDS,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_LOAD_SOUND_MODEL_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[LOAD_SOUND_MODEL], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_LOAD_SOUND_MODEL_BIT;
-    }
+    if (my_data->xml_version <= PLATFORM_XML_VERSION_0x0105) {
+        err = str_parms_get_str(parms, ST_PARAM_KEY_LOAD_SOUND_MODEL_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_LOAD_SOUND_MODEL_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[LOAD_SOUND_MODEL], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_LOAD_SOUND_MODEL_BIT;
+        }
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_UNLOAD_SOUND_MODEL_IDS,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_UNLOAD_SOUND_MODEL_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[UNLOAD_SOUND_MODEL], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_UNLOAD_SOUND_MODEL_BIT;
-    }
+        err = str_parms_get_str(parms, ST_PARAM_KEY_UNLOAD_SOUND_MODEL_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_UNLOAD_SOUND_MODEL_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[UNLOAD_SOUND_MODEL], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_UNLOAD_SOUND_MODEL_BIT;
+        }
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_REQUEST_DETECTION_IDS,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_REQUEST_DETECTION_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[REQUEST_DETECTION], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_REQUEST_DETECTION_BIT;
-    }
+        err = str_parms_get_str(parms, ST_PARAM_KEY_REQUEST_DETECTION_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_REQUEST_DETECTION_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[REQUEST_DETECTION], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_REQUEST_DETECTION_BIT;
+        }
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_LAB_DAM_CFG_IDS,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_LAB_DAM_CFG_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[LAB_DAM_CFG], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_LAB_DAM_CFG_BIT;
-    }
+        err = str_parms_get_str(parms, ST_PARAM_KEY_LAB_DAM_CFG_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_LAB_DAM_CFG_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[LAB_DAM_CFG], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_LAB_DAM_CFG_BIT;
+        }
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_CONFIDENCE_LEVELS_IDS,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_CONFIDENCE_LEVELS_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[CONFIDENCE_LEVELS], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_CONFIDENCE_LEVELS_BIT;
-    }
+        err = str_parms_get_str(parms, ST_PARAM_KEY_CONFIDENCE_LEVELS_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_CONFIDENCE_LEVELS_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[CONFIDENCE_LEVELS], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_CONFIDENCE_LEVELS_BIT;
+        }
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_OPERATION_MODE_IDS,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_OPERATION_MODE_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[OPERATION_MODE], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_OPERATION_MODE_BIT;
-    }
+        err = str_parms_get_str(parms, ST_PARAM_KEY_OPERATION_MODE_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_OPERATION_MODE_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[OPERATION_MODE], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_OPERATION_MODE_BIT;
+        }
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_POLLING_ENABLE_IDS,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_POLLING_ENABLE_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[POLLING_ENABLE], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_POLLING_ENABLE_BIT;
-    }
+        err = str_parms_get_str(parms, ST_PARAM_KEY_POLLING_ENABLE_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_POLLING_ENABLE_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[POLLING_ENABLE], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_POLLING_ENABLE_BIT;
+        }
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_CUSTOM_CONFIG_IDS,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_CUSTOM_CONFIG_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[CUSTOM_CONFIG], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_CUSTOM_CONFIG_BIT;
-    }
+        err = str_parms_get_str(parms, ST_PARAM_KEY_CUSTOM_CONFIG_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_CUSTOM_CONFIG_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[CUSTOM_CONFIG], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_CUSTOM_CONFIG_BIT;
+        }
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_DET_EVENT_TYPE_IDS,
-                            str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_DET_EVENT_TYPE_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[DET_EVENT_TYPE], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_DET_EVENT_TYPE_BIT;
-    }
+        err = str_parms_get_str(parms, ST_PARAM_KEY_DET_EVENT_TYPE_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_DET_EVENT_TYPE_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[DET_EVENT_TYPE], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_DET_EVENT_TYPE_BIT;
+        }
 
-    err = str_parms_get_str(parms, ST_PARAM_KEY_LAB_CONTROL_IDS,
+        err = str_parms_get_str(parms, ST_PARAM_KEY_LAB_CONTROL_IDS,
+                                str_value, sizeof(str_value));
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_LAB_CONTROL_IDS);
+            ret = platform_stdev_set_module_param_ids(
+                &lsm_params->params[LAB_CONTROL], str_value, is_legacy_params);
+            if (ret)
+                goto err_exit;
+            lsm_params->param_tag_tracker |= PARAM_LAB_CONTROL_BIT;
+        }
+    } else {
+        err = str_parms_get_str(parms, ST_PARAM_KEY_PDK5_APP_TYPE,
                             str_value, sizeof(str_value));
-    if (err >= 0) {
-        str_parms_del(parms, ST_PARAM_KEY_LAB_CONTROL_IDS);
-        ret = platform_stdev_set_module_param_ids(
-            &lsm_params->params[LAB_CONTROL], str_value, is_legacy_params);
-        if (ret)
-            goto err_exit;
-        lsm_params->param_tag_tracker |= PARAM_LAB_CONTROL_BIT;
+        if (err >= 0) {
+            str_parms_del(parms, ST_PARAM_KEY_PDK5_APP_TYPE);
+            lsm_params->pdk5_app_type = strtoul(str_value, NULL, 16);
+        }
     }
 
     if (is_legacy_version == false) {
@@ -2277,15 +2479,52 @@ static int platform_stdev_set_lsm_params
         }
     }
 
-    list_add_tail(&sm_info->lsm_usecase_list, &lsm_params->list_node);
     free(kv_pairs);
     return 0;
 
 err_exit:
-    if (lsm_params)
-        free(lsm_params);
+    list_for_each_safe(module_node, tmp_node,
+        &lsm_params->module_params_list) {
+        module_params = node_to_item(module_node, struct st_module_params,
+            list_node);
+        list_remove(module_node);
+        free(module_params);
+    }
+    free(lsm_params);
     free(kv_pairs);
     return ret;
+}
+
+static int platform_stdev_create_lsm_params
+(
+    void *platform
+)
+{
+    struct platform_data *my_data = (struct platform_data *)platform;
+    struct st_vendor_info *sm_info = NULL;
+    struct st_lsm_params *lsm_params = NULL;
+    struct listnode *sm_info_node = NULL;
+
+    sm_info_node = list_tail(&my_data->stdev->vendor_uuid_list);
+    if (sm_info_node) {
+        sm_info = node_to_item(sm_info_node, struct st_vendor_info, list_node);
+    } else {
+        ALOGE("%s: found NULL sm_info", __func__);
+        return -EINVAL;
+    }
+
+    lsm_params = calloc(1, sizeof(struct st_lsm_params));
+    if (!lsm_params) {
+        ALOGE("%s: lsm_params allcoation failed", __func__);
+        return -ENOMEM;
+    }
+
+    if (my_data->xml_version > PLATFORM_XML_VERSION_0x0105)
+        list_init(&lsm_params->module_params_list);
+
+    list_add_tail(&sm_info->lsm_usecase_list, &lsm_params->list_node);
+
+    return 0;
 }
 
 static int platform_stdev_create_sm_config_params
@@ -2340,16 +2579,18 @@ static int platform_stdev_set_sm_config_params
 {
     struct platform_data *my_data = (struct platform_data *)platform;
     sound_trigger_device_t *stdev = my_data->stdev;
-    struct listnode *sm_info_node, *gcs_node, *arm_node, *lsm_node;
+    struct listnode *sm_info_node = NULL, *gcs_node = NULL;
+    struct listnode *arm_node = NULL, *lsm_node = NULL, *module_node = NULL;
+    struct listnode *tmp_node = NULL, *tmp_node1 = NULL;
     struct st_vendor_info *sm_info = NULL;
     char str_value[ST_MAX_STRING_PARAM_SIZE];
     char *kv_pairs = str_parms_to_str(parms);
-    int ret = 0, err, value;
-    struct listnode *tmp_node;
-    struct st_gcs_params *gcs_params;
-    struct st_arm_ss_params *arm_params;
-    struct st_lsm_ss_params *lsm_ss_params;
-    struct st_lsm_params *lsm_params;
+    int ret = 0, err = 0, value = 0;
+    struct st_gcs_params *gcs_params = NULL;
+    struct st_arm_ss_params *arm_params = NULL;
+    struct st_lsm_ss_params *lsm_ss_params = NULL;
+    struct st_lsm_params *lsm_params = NULL;
+    struct st_module_params *module_params = NULL;
 
     ALOGV("%s: enter: %s", __func__, kv_pairs);
     if (kv_pairs == NULL) {
@@ -2622,6 +2863,13 @@ error_exit:
         list_for_each_safe(lsm_node, tmp_node, &sm_info->lsm_usecase_list) {
             lsm_params = node_to_item(lsm_node, struct st_lsm_params, list_node);
             list_remove(lsm_node);
+            list_for_each_safe(module_node, tmp_node1,
+                &lsm_params->module_params_list) {
+                module_params = node_to_item(module_node, struct st_module_params,
+                    list_node);
+                list_remove(module_node);
+                free(module_params);
+            }
             free(lsm_params);
         }
         list_remove(sm_info_node);
@@ -2816,8 +3064,11 @@ static void platform_stdev_process_versioned_xml_data
         my_data->st_xml_tag = TAG_GCS_USECASE;
     } else if (!strcmp(tag_name, "lsm_usecase")) {
         my_data->st_xml_tag = TAG_LSM_USECASE;
+        platform_stdev_create_lsm_params(my_data);
     } else if (!strcmp(tag_name, "lsm_ss_usecase")) {
         my_data->st_xml_tag = TAG_LSM_SS_USECASE;
+    } else if (!strcmp(tag_name, "module_params")) {
+        my_data->st_xml_tag = TAG_MODULE_PARAMS;
     } else if (!strcmp(tag_name, "adm_config")) {
         my_data->st_xml_tag = TAG_ADM_CFG;
     } else if (!strcmp(tag_name, "backend_type")) {
@@ -2833,6 +3084,7 @@ static void platform_stdev_process_versioned_xml_data
             (my_data->st_xml_tag != TAG_GCS_USECASE) &&
             (my_data->st_xml_tag != TAG_LSM_USECASE) &&
             (my_data->st_xml_tag != TAG_LSM_SS_USECASE) &&
+            (my_data->st_xml_tag != TAG_MODULE_PARAMS) &&
             (my_data->st_xml_tag != TAG_ADM_CFG) &&
             (my_data->st_xml_tag != TAG_BACKEND_TYPE) &&
             (my_data->st_xml_tag != TAG_LPMA_CONFIG) &&
@@ -2891,6 +3143,9 @@ static void end_tag(void *userdata, const XML_Char *tag_name)
     } else if (!strcmp(tag_name, "lsm_usecase")) {
         platform->st_xml_tag = TAG_SOUND_MODEL;
         platform_stdev_set_lsm_params(platform, platform->kvpairs);
+    } else if (!strcmp(tag_name, "module_params")) {
+        platform->st_xml_tag = TAG_LSM_USECASE;
+        platform_stdev_set_module_params(platform, platform->kvpairs);
     } else if (!strcmp(tag_name, "sound_model_config")) {
         platform->st_xml_tag = TAG_ROOT;
         platform_stdev_set_sm_config_params(platform, platform->kvpairs);
@@ -3000,20 +3255,23 @@ static int get_codec_version(struct platform_data *my_data,
     return 0;
 }
 
-static void query_stdev_platform(sound_trigger_device_t *stdev,
+static void query_stdev_platform(struct platform_data *my_data,
                                  const char *snd_card_name,
                                  char *mixer_path_xml)
 {
     if (strstr(snd_card_name, "msm8939-tapan")) {
-        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME_WCD9306,
-                        sizeof(MIXER_PATH_FILE_NAME_WCD9306));
+        get_xml_file_path(my_data->xml_file_path, MIXER_PATH_FILE_NAME_WCD9306,
+            my_data->vendor_config_path);
+        strlcpy(mixer_path_xml, my_data->xml_file_path, MIXER_PATH_MAX_LENGTH);
     } else if (strstr(snd_card_name, "msm8952-tomtom")||
                  strstr(snd_card_name, "msm8996-tomtom")) {
-        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME_WCD9330,
-                        sizeof(MIXER_PATH_FILE_NAME_WCD9330));
+        get_xml_file_path(my_data->xml_file_path, MIXER_PATH_FILE_NAME_WCD9330,
+            my_data->vendor_config_path);
+        strlcpy(mixer_path_xml, my_data->xml_file_path, MIXER_PATH_MAX_LENGTH);
     } else if (strstr(snd_card_name, "sdm670-skuw")) {
-        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME_SKUW,
-                        sizeof(MIXER_PATH_FILE_NAME_SKUW));
+        get_xml_file_path(my_data->xml_file_path, MIXER_PATH_FILE_NAME_SKUW,
+            my_data->vendor_config_path);
+        strlcpy(mixer_path_xml, my_data->xml_file_path, MIXER_PATH_MAX_LENGTH);
     } else if (strstr(snd_card_name, "msm8976-tasha")||
                  strstr(snd_card_name, "msm8952-tasha") ||
                  strstr(snd_card_name, "msm8953-tasha") ||
@@ -3022,22 +3280,27 @@ static void query_stdev_platform(sound_trigger_device_t *stdev,
                  strstr(snd_card_name, "sdm660-tasha") ||
                  strstr(snd_card_name, "sdm670-tasha") ||
                  strstr(snd_card_name, "apq8009-tashalite")) {
-        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME_WCD9335,
-                        sizeof(MIXER_PATH_FILE_NAME_WCD9335));
+        get_xml_file_path(my_data->xml_file_path, MIXER_PATH_FILE_NAME_WCD9335,
+            my_data->vendor_config_path);
+        strlcpy(mixer_path_xml, my_data->xml_file_path, MIXER_PATH_MAX_LENGTH);
     } else if (strstr(snd_card_name, "tavil")) {
-        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME_WCD9340,
-            sizeof(MIXER_PATH_FILE_NAME_WCD9340));
-        stdev->is_gcs = true;
+        get_xml_file_path(my_data->xml_file_path, MIXER_PATH_FILE_NAME_WCD9340,
+            my_data->vendor_config_path);
+        strlcpy(mixer_path_xml, my_data->xml_file_path, MIXER_PATH_MAX_LENGTH);
+        my_data->stdev->is_gcs = true;
     } else if (strstr(snd_card_name, "bg")) {
-        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME_BG,
-            sizeof(MIXER_PATH_FILE_NAME_BG));
-        stdev->is_gcs = true;
+        get_xml_file_path(my_data->xml_file_path, MIXER_PATH_FILE_NAME_BG,
+            my_data->vendor_config_path);
+        strlcpy(mixer_path_xml, my_data->xml_file_path, MIXER_PATH_MAX_LENGTH);
+        my_data->stdev->is_gcs = true;
     } else if (strstr(snd_card_name, "qcs405-tdm")) {
-        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME_TDM,
-            sizeof(MIXER_PATH_FILE_NAME_TDM));
+        get_xml_file_path(my_data->xml_file_path, MIXER_PATH_FILE_NAME_TDM,
+            my_data->vendor_config_path);
+        strlcpy(mixer_path_xml, my_data->xml_file_path, MIXER_PATH_MAX_LENGTH);
     } else {
-        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME,
-                         sizeof(MIXER_PATH_FILE_NAME));
+        get_xml_file_path(my_data->xml_file_path, MIXER_PATH_FILE_NAME,
+            my_data->vendor_config_path);
+        strlcpy(mixer_path_xml, my_data->xml_file_path, MIXER_PATH_MAX_LENGTH);
     }
     /* create mixer path file name from sound card name
     and attach cdp/qrd if sound card name has cdp/qrd */
@@ -3081,8 +3344,9 @@ static void query_stdev_platform(sound_trigger_device_t *stdev,
     }
     if (!strncmp(snd_card_name, "sm6150-wcd9375qrd-snd-card",
         sizeof("sm6150-wcd9375qrd-snd-card"))) {
-        strlcpy(mixer_path_xml, MIXER_PATH_FILE_NAME,
-                        sizeof(MIXER_PATH_FILE_NAME));
+        get_xml_file_path(my_data->xml_file_path, MIXER_PATH_FILE_NAME,
+            my_data->vendor_config_path);
+        strlcpy(mixer_path_xml, my_data->xml_file_path, MIXER_PATH_MAX_LENGTH);
     }
 
     strlcat(mixer_path_xml, MIXER_FILE_EXT, MIXER_PATH_MAX_LENGTH);
@@ -3116,7 +3380,7 @@ static void query_stdev_platform(sound_trigger_device_t *stdev,
         !strstr(snd_card_name, "sm6150-tavil") &&
         !strstr(snd_card_name, "apq8009-tasha") &&
         !strstr(snd_card_name, "msm8939-tomtom")) {
-        stdev->sw_mad = true;
+        my_data->stdev->sw_mad = true;
     }
 }
 
@@ -3167,13 +3431,13 @@ done:
  */
 static int clear_devices(struct listnode *devices)
 {
-    struct listnode *node = NULL;
+    struct listnode *node = NULL, *temp = NULL;
     struct audio_device_info *item = NULL;
 
     if (devices == NULL)
         return 0;
 
-    list_for_each (node, devices) {
+    list_for_each_safe (node, temp, devices) {
         item = node_to_item(node, struct audio_device_info, list);
         if (item != NULL) {
             list_remove(&item->list);
@@ -3745,8 +4009,12 @@ void *platform_stdev_init(sound_trigger_device_t *stdev)
     list_init(&stdev->adm_cfg_list);
     list_init(&my_data->acdb_meta_key_list);
 
+    platform_stdev_get_vendor_config_path(my_data->vendor_config_path,
+        sizeof(my_data->vendor_config_path));
     platform_stdev_set_default_config(my_data);
-    platform_parse_info(my_data, PLATFORM_PATH_XML);
+    get_xml_file_path(my_data->xml_file_path, PLATFORM_PATH_XML,
+        my_data->vendor_config_path);
+    platform_parse_info(my_data, my_data->xml_file_path);
 
     my_data->hwdep_fd = -1;
     my_data->vad_hwdep_fd = -1;
@@ -3799,7 +4067,7 @@ void *platform_stdev_init(sound_trigger_device_t *stdev)
 
     snd_card_name = mixer_get_name(stdev->mixer);
 
-    query_stdev_platform(stdev, snd_card_name, mixer_path_xml);
+    query_stdev_platform(my_data, snd_card_name, mixer_path_xml);
     stdev->audio_route = audio_route_init(snd_card_num, mixer_path_xml);
     if (!stdev->audio_route) {
         ALOGE("%s: ERROR. Failed to init audio route controls, aborting.",
@@ -3899,12 +4167,6 @@ void *platform_stdev_init(sound_trigger_device_t *stdev)
             v_info->merge_fs_soundmodels = false;
             ALOGV("%s: ISV uuid present", __func__);
         }
-        if (!stdev->adpcm_dec_lib_handle &&
-             (v_info->kw_capture_format & ADPCM)) {
-            ret = load_adpcm_decoder(stdev);
-            if (ret)
-                goto cleanup;
-        }
         if (!stdev->mulaw_dec_lib_handle &&
              (v_info->kw_capture_format & MULAW)) {
             ret = load_mulaw_decoder(stdev);
@@ -3946,9 +4208,6 @@ cleanup:
     if (stdev->mulaw_dec_lib_handle)
         dlclose(stdev->mulaw_dec_lib_handle);
 
-    if (stdev->adpcm_dec_lib_handle)
-        dlclose(stdev->adpcm_dec_lib_handle);
-
     if (my_data->acdb_handle)
         dlclose(my_data->acdb_handle);
 
@@ -3985,14 +4244,16 @@ cleanup:
 void platform_stdev_deinit(void *platform)
 {
     struct platform_data *my_data = (struct platform_data *)platform;
-    struct listnode *v_node, *temp_node, *gcs_node, *temp_node1;
-    struct listnode *arm_node, *lsm_node, *mk_node;
-    struct st_vendor_info* v_info;
-    struct st_gcs_params *gcs_info;
-    struct meta_key_list *key_info;
-    struct st_arm_ss_params *arm_info;
-    struct st_lsm_ss_params *lsm_ss_info;
-    struct st_lsm_params *lsm_info;
+    struct listnode *v_node = NULL, *temp_node = NULL, *gcs_node = NULL;
+    struct listnode *temp_node1 = NULL, *temp_node2 = NULL, *module_node = NULL;
+    struct listnode *arm_node = NULL, *lsm_node = NULL, *mk_node = NULL;
+    struct st_vendor_info* v_info = NULL;
+    struct st_gcs_params *gcs_info = NULL;
+    struct meta_key_list *key_info = NULL;
+    struct st_arm_ss_params *arm_info = NULL;
+    struct st_lsm_ss_params *lsm_ss_info = NULL;
+    struct st_lsm_params *lsm_info = NULL;
+    struct st_module_params *module_info = NULL;
 
     ALOGI("%s: Enter", __func__);
     if (my_data) {
@@ -4018,6 +4279,13 @@ void platform_stdev_deinit(void *platform)
             list_for_each_safe(lsm_node, temp_node1, &v_info->lsm_usecase_list) {
                 lsm_info = node_to_item(lsm_node, struct st_lsm_params, list_node);
                 list_remove(lsm_node);
+                list_for_each_safe(module_node, temp_node2,
+                    &lsm_info->module_params_list) {
+                    module_info = node_to_item(module_node, struct st_module_params,
+                        list_node);
+                    list_remove(module_node);
+                    free(module_info);
+                }
                 free(lsm_info);
             }
 
@@ -4035,8 +4303,6 @@ void platform_stdev_deinit(void *platform)
         dlclose(my_data->acdb_handle);
         if (my_data->stdev->smlib_handle)
             dlclose(my_data->stdev->smlib_handle);
-        if (my_data->stdev->adpcm_dec_lib_handle)
-            dlclose(my_data->stdev->adpcm_dec_lib_handle);
         if (my_data->stdev->mulaw_dec_lib_handle)
             dlclose(my_data->stdev->mulaw_dec_lib_handle);
         audio_route_free(my_data->stdev->audio_route);
@@ -4386,6 +4652,30 @@ bool platform_get_lpi_mode(void *platform)
     return my_data->codec_backend_cfg.lpi_enable;
 }
 
+int platform_get_lpi_st_device(int st_device)
+{
+    int lpi_device = st_device;
+
+    switch (st_device) {
+    case ST_DEVICE_HANDSET_DMIC:
+        lpi_device = ST_DEVICE_HANDSET_DMIC_LPI;
+        break;
+    case ST_DEVICE_HANDSET_TMIC:
+        lpi_device = ST_DEVICE_HANDSET_TMIC_LPI;
+        break;
+    case ST_DEVICE_HANDSET_QMIC:
+        lpi_device = ST_DEVICE_HANDSET_QMIC_LPI;
+        break;
+    case ST_DEVICE_HEADSET_MIC:
+        lpi_device = ST_DEVICE_HEADSET_MIC_LPI;
+        break;
+    default:
+        ALOGV("%s: No need to convert device %d", __func__, st_device);
+    }
+
+    return lpi_device;
+}
+
 #ifdef SNDRV_IOCTL_HWDEP_VAD_CAL_TYPE
 static int platform_stdev_send_hwvad_cal
 (
@@ -4669,7 +4959,7 @@ bool platform_stdev_check_and_update_concurrency
 {
     struct platform_data *my_data;
     sound_trigger_device_t *stdev;
-    bool concurrency_ses_allowed = false;
+    bool concurrency_ses_allowed = true;
 
     if (!platform) {
         ALOGE("%s: NULL platform", __func__);
@@ -4682,8 +4972,34 @@ bool platform_stdev_check_and_update_concurrency
     }
     stdev = my_data->stdev;
 
-    /* handle CAPTURE_STREAM events */
-    if (config) {
+    if (event_type == AUDIO_EVENT_CAPTURE_DEVICE_ACTIVE ||
+        event_type == AUDIO_EVENT_CAPTURE_DEVICE_INACTIVE) {
+        /* handle CAPTURE_DEVICE events */
+        ALOGI("%s: Received DEVICE event, event type %d",
+              __func__, event_type);
+        /*
+         * for device status events, if:
+         * 1. conc audio disabled - return with false to disable VA sessions
+         * 2. conc audio enabled - due to use case type unknown, return with
+         *    current decision
+         */
+        switch (event_type) {
+            case AUDIO_EVENT_CAPTURE_DEVICE_ACTIVE:
+                stdev->tx_concurrency_active++;
+                break;
+            case AUDIO_EVENT_CAPTURE_DEVICE_INACTIVE:
+                if (stdev->tx_concurrency_active > 0)
+                    stdev->tx_concurrency_active--;
+                break;
+            default:
+                break;
+        }
+        if (stdev->conc_capture_supported)
+            concurrency_ses_allowed = stdev->session_allowed;
+        else if (stdev->tx_concurrency_active > 0)
+            concurrency_ses_allowed = false;
+    } else {
+        /* handle CAPTURE_STREAM events */
         ALOGI("%s: Received STREAM event, event type %d, usecase type %d",
               __func__, event_type, config->u.usecase.type);
         switch (event_type) {
@@ -4723,42 +5039,19 @@ bool platform_stdev_check_and_update_concurrency
         }
         if (event_type == AUDIO_EVENT_PLAYBACK_STREAM_ACTIVE ||
             event_type == AUDIO_EVENT_PLAYBACK_STREAM_INACTIVE) {
-            concurrency_ses_allowed = true;
             if (stdev->rx_concurrency_disabled &&
                 stdev->rx_concurrency_active > 0 &&
                 num_sessions > stdev->rx_conc_max_st_ses)
                 concurrency_ses_allowed = false;
-        } else if (stdev->conc_capture_supported) {
-            concurrency_ses_allowed = true;
-            if ((!stdev->conc_voice_call_supported && stdev->conc_voice_active) ||
-                (!stdev->conc_voip_call_supported && stdev->conc_voip_active))
+        }
+        if (concurrency_ses_allowed) {
+            if ((!stdev->conc_capture_supported &&
+                 stdev->tx_concurrency_active > 0) ||
+                (stdev->conc_capture_supported &&
+                 ((!stdev->conc_voice_call_supported && stdev->conc_voice_active) ||
+                  (!stdev->conc_voip_call_supported && stdev->conc_voip_active))))
                 concurrency_ses_allowed = false;
         }
-    } else {
-        /* handle CAPTURE_DEVICE events */
-        ALOGI("%s: Received DEVICE event, event type %d",
-              __func__, event_type);
-        /*
-         * for device status events, if:
-         * 1. conc audio disabled - return with false to disable VA sessions
-         * 2. conc audio enabled - due to use case type unknown, return with
-         *    current decision
-         */
-        switch (event_type) {
-            case AUDIO_EVENT_CAPTURE_DEVICE_ACTIVE:
-                stdev->tx_concurrency_active++;
-                break;
-            case AUDIO_EVENT_CAPTURE_DEVICE_INACTIVE:
-                if (stdev->tx_concurrency_active > 0)
-                    stdev->tx_concurrency_active--;
-                break;
-            default:
-                break;
-        }
-        if (stdev->conc_capture_supported)
-            concurrency_ses_allowed = stdev->session_allowed;
-        else if (stdev->tx_concurrency_active == 0)
-            concurrency_ses_allowed = true;
     }
 
     /*
@@ -4783,35 +5076,14 @@ bool platform_stdev_check_and_update_concurrency
 
 void platform_stdev_check_and_update_pcm_config
 (
-   void *platform,
    struct pcm_config *config,
-   struct st_vendor_info *v_info,
-   enum st_exec_mode exec_mode
+   struct st_vendor_info *v_info
 )
 {
-    struct platform_data *my_data = (struct platform_data *)platform;
-    const char *snd_card_name;
-
     /* Update config with params in vendor info */
     config->rate = v_info->sample_rate;
     config->format = v_info->format;
     config->channels = v_info->out_channels;
-
-    if (exec_mode == ST_EXEC_MODE_CPE && !my_data->stdev->is_gcs) {
-        snd_card_name = mixer_get_name(my_data->stdev->mixer);
-        if (strstr(snd_card_name, "tomtom") ||
-            strstr(my_data->codec_version, "WCD9335_1_0") ||
-            strstr(my_data->codec_version, "WCD9335_1_1")) {
-            /* tomtom, Tasha1.0, Tasha1.1 support max 16KHz/24bit bandwidth */
-            config->rate = SOUND_TRIGGER_SAMPLING_RATE_16000;
-            if (config->format != PCM_FORMAT_S16_LE)
-                config->format = PCM_FORMAT_S24_LE;
-        } else {
-            /* Other codecs configured at ftrt 384Khz/32bit */
-            config->rate = SOUND_TRIGGER_SAMPLING_RATE_384000;
-            config->format = PCM_FORMAT_S32_LE;
-        }
-    }
 }
 
 int platform_stdev_connect_mad
@@ -4883,18 +5155,6 @@ int platform_stdev_get_hw_type(void *platform)
                 ALOGE("%s: ERROR. adsp pcm dev_id parse failed", __func__);
 
             snprintf(comp_string, USECASE_STRING_SIZE, "Listen %d Audio Service", i+1);
-        } else if (strstr(line, "CPE Listen") && (j < stdev->max_cpe_sessions)) {
-            stdev->hw_type |= ST_DEVICE_HW_CPE;
-            /* store the Back End types associated with the Front End*/
-            if (strstr(line, "ECPP"))
-                stdev->cpe_pcm_use_cases[j].pcm_back_end = CPE_PCM_BACK_END_ECPP;
-            else
-                stdev->cpe_pcm_use_cases[j].pcm_back_end = CPE_PCM_BACK_END_DEFAULT;
-
-            if (sscanf(&line[3], "%d", &dev_id) == 1)
-                stdev->cpe_pcm_use_cases[j++].pcm_id = dev_id;
-            else
-                ALOGE("%s: ERROR. cpe pcm dev_id parse failed", __func__);
         } else if (strstr(line, CAPTURE_PCM_USECASE_STRING)) {
             stdev->hw_type |= ST_DEVICE_HW_ARM;
             if (sscanf(&line[3], "%d", &dev_id) == 1)
@@ -4944,47 +5204,6 @@ int platform_stdev_get_hw_type(void *platform)
     return 0;
 }
 
-int platform_cpe_get_pcm_device_id
-(
-   void *platform,
-   int sample_rate,
-   unsigned int* use_case_idx
-)
-{
-    struct platform_data *my_data = (struct platform_data *)platform;
-    sound_trigger_device_t *stdev = my_data->stdev;
-    unsigned int i;
-    int ret = -1;
-    bool found = false;
-
-    for (i = 0; i < stdev->max_cpe_sessions; i++) {
-        if (!stdev->cpe_pcm_use_cases[i].active) {
-            /* pcm device nodes are fixed based on backend types. Check for
-            supported combination. */
-            if (my_data->cpe_fe_to_be_fixed &&
-                sample_rate == SOUND_TRIGGER_SAMPLING_RATE_48000) {
-                if (stdev->cpe_pcm_use_cases[i].pcm_back_end == CPE_PCM_BACK_END_ECPP) {
-                    found = true;
-                }
-            } else {
-                found = true;
-            }
-
-            if (found) {
-                stdev->cpe_pcm_use_cases[i].active = true;
-                ret = stdev->cpe_pcm_use_cases[i].pcm_id;
-                *use_case_idx = i;
-                break;
-            }
-        }
-    }
-
-    if (ret < 0)
-        ALOGE("%s: ERROR. no free pcm device available", __func__);
-
-    return ret;
-}
-
 int platform_ape_get_pcm_device_id
 (
    void *platform,
@@ -5023,24 +5242,6 @@ void platform_ape_free_pcm_device_id
     for (i = 0; i < stdev->max_ape_sessions; i++) {
         if (stdev->ape_pcm_use_cases[i].pcm_id == pcm_id) {
             stdev->ape_pcm_use_cases[i].active = false;
-            break;
-        }
-    }
-}
-
-void platform_cpe_free_pcm_device_id
-(
-   void *platform,
-   int pcm_id
-)
-{
-    struct platform_data *my_data = (struct platform_data *)platform;
-    sound_trigger_device_t *stdev = my_data->stdev;
-    unsigned int i;
-
-    for (i = 0; i < stdev->max_cpe_sessions; i++) {
-        if (stdev->cpe_pcm_use_cases[i].pcm_id == pcm_id) {
-            stdev->cpe_pcm_use_cases[i].active = false;
             break;
         }
     }
@@ -5215,13 +5416,37 @@ static int get_shared_buf_fmt
     return ret;
 }
 
+bool platform_get_module_params_for_lsm_usecase
+(
+    struct st_lsm_params *usecase,
+    st_module_type_t sm_version
+)
+{
+    struct listnode *module_node = NULL, *tmp_node = NULL;
+    struct st_module_params *module_info = NULL;
+
+    list_for_each_safe(module_node, tmp_node, &usecase->module_params_list) {
+        module_info = node_to_item(module_node, struct st_module_params,
+            list_node);
+        if (module_info->type == sm_version) {
+            memcpy((uint8_t *)usecase->params, (uint8_t *)module_info->params,
+                sizeof(struct st_module_param_info) * MAX_PARAM_IDS);
+            usecase->param_tag_tracker = module_info->param_tag_tracker;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void platform_get_lsm_usecase
 (
    void* platform,
    struct st_vendor_info* v_info,
    struct st_lsm_params** lsm_usecase,
    st_exec_mode_t exec_mode,
-   bool lpi_enable
+   bool lpi_enable,
+   st_module_type_t sm_version
 )
 {
     struct st_lsm_params *usecase = NULL;
@@ -5230,6 +5455,7 @@ void platform_get_lsm_usecase
     audio_devices_t capture_device =
         platform_stdev_get_capture_device(platform);
     sound_trigger_device_t *stdev = my_data->stdev;
+    bool set_module_params = false;
 
     ALOGV("%s: Enter", __func__);
 
@@ -5275,12 +5501,26 @@ void platform_get_lsm_usecase
                      (usecase->lpi_enable == ST_PLATFORM_LPI_DISABLE &&
                       !lpi_enable && !stdev->barge_in_mode))) {
                     *lsm_usecase = usecase;
+                    if (my_data->xml_version == PLATFORM_XML_VERSION_0x0106) {
+                        set_module_params =
+                            platform_get_module_params_for_lsm_usecase(usecase,
+                                sm_version);
+                        if (!set_module_params) {
+                            ALOGE("%s: Error. No matching module info params.",
+                                __func__);
+                            return;
+                        }
+                    }
                     v_info->in_channels = usecase->in_channels;
                     v_info->fluence_type = usecase->fluence_type;
                     v_info->profile_type = usecase->adm_cfg_profile;
                     v_info->shared_buf_fmt =
                         get_shared_buf_fmt(v_info->profile_type);
-                    v_info->app_type = usecase->app_type;
+                    if (sm_version == ST_MODULE_TYPE_PDK5) {
+                        v_info->app_type = usecase->pdk5_app_type;
+                    } else {
+                        v_info->app_type = usecase->app_type;
+                    }
                     return;
                 }
             } else {
@@ -5692,10 +5932,12 @@ void platform_stdev_send_ec_ref_cfg
     if (is_ec_profile(profile_type)) {
         event_info.st_ec_ref_enabled = enable;
         // reset the pending active EC mixer ctls first
-        if (!stdev->audio_ec_enabled && stdev->ec_reset_pending_cnt > 0) {
-            while (stdev->ec_reset_pending_cnt--)
+        if (!stdev->audio_ec_enabled) {
+            while (stdev->ec_reset_pending_cnt > 0) {
                 audio_route_reset_and_update_path(stdev->audio_route,
                         my_data->ec_ref_mixer_path);
+                stdev->ec_reset_pending_cnt--;
+            }
         }
         if (enable) {
             stdev->audio_hal_cb(ST_EVENT_UPDATE_ECHO_REF, &event_info);

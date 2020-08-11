@@ -42,29 +42,18 @@ struct sound_trigger_device;
 
 #define PCM_DEVICE_FILE "/proc/asound/pcm"
 
-#define MIXER_PATH_MAX_LENGTH 100
+#define MIXER_PATH_MAX_LENGTH 128
 #define MIXER_FILE_EXT ".xml"
-#define MIXER_PATH_FILE_NAME_WCD9306 "/vendor/etc/sound_trigger_mixer_paths_wcd9306"
-#define MIXER_PATH_FILE_NAME_WCD9330 "/vendor/etc/sound_trigger_mixer_paths_wcd9330"
-
-#ifdef LINUX_ENABLED
-#define MIXER_PATH_FILE_NAME "/etc/sound_trigger_mixer_paths"
-#define MIXER_PATH_FILE_NAME_WCD9335 "/etc/sound_trigger_mixer_paths_wcd9335"
-#define MIXER_PATH_FILE_NAME_SKUW "/etc/sound_trigger_mixer_paths_skuw"
-#define MIXER_PATH_FILE_NAME_TDM "/etc/sound_trigger_mixer_paths_tdm"
-#define PLATFORM_PATH_XML "/etc/sound_trigger_platform_info.xml"
-#else
-#define MIXER_PATH_FILE_NAME "/vendor/etc/sound_trigger_mixer_paths"
-#define MIXER_PATH_FILE_NAME_WCD9335 "/vendor/etc/sound_trigger_mixer_paths_wcd9335"
-#define MIXER_PATH_FILE_NAME_SKUW "/vendor/etc/sound_trigger_mixer_paths_skuw"
-#define MIXER_PATH_FILE_NAME_TDM "/vendor/etc/sound_trigger_mixer_paths_tdm"
-#define PLATFORM_PATH_XML "/vendor/etc/sound_trigger_platform_info.xml"
-#endif
-#define MIXER_PATH_FILE_NAME_WCD9340 "/vendor/etc/sound_trigger_mixer_paths_wcd9340"
-#define MIXER_PATH_FILE_NAME_BG "/vendor/etc/sound_trigger_mixer_paths_bg"
-
+#define MIXER_PATH_FILE_NAME_WCD9306 "sound_trigger_mixer_paths_wcd9306"
+#define MIXER_PATH_FILE_NAME_WCD9330 "sound_trigger_mixer_paths_wcd9330"
+#define MIXER_PATH_FILE_NAME "sound_trigger_mixer_paths"
+#define MIXER_PATH_FILE_NAME_WCD9335 "sound_trigger_mixer_paths_wcd9335"
+#define MIXER_PATH_FILE_NAME_SKUW "sound_trigger_mixer_paths_skuw"
+#define MIXER_PATH_FILE_NAME_TDM "sound_trigger_mixer_paths_tdm"
+#define PLATFORM_PATH_XML "sound_trigger_platform_info.xml"
+#define MIXER_PATH_FILE_NAME_WCD9340 "sound_trigger_mixer_paths_wcd9340"
+#define MIXER_PATH_FILE_NAME_BG "sound_trigger_mixer_paths_bg"
 #define LIB_ACDB_LOADER "libacdbloader.so"
-#define LIB_ADPCM_DECODER "libadpcmdec.so"
 #define LIB_MULAW_DECODER "libmulawdec.so"
 #define LIB_SVA_SOUNDMODEL "liblistensoundmodel2.so"
 
@@ -77,6 +66,7 @@ struct sound_trigger_device;
 #define PLATFORM_XML_VERSION_0x0102 0x0102
 #define PLATFORM_XML_VERSION_0x0103 0x0103
 #define PLATFORM_XML_VERSION_0x0105 0x0105
+#define PLATFORM_XML_VERSION_0x0106 0x0106
 
 /* Default ACDB ids. TODO-V: can be removed as default xml is anyway hosting these */
 #define DEVICE_HANDSET_APE_ACDB_ID   (127)
@@ -195,12 +185,9 @@ struct hwdep_cal_param_data {
 };
 
 typedef enum {
-    ADPCM_CUSTOM_PACKET = 0x01,
-    ADPCM_RAW = 0x02,
     PCM_CUSTOM_PACKET = 0x04,
     PCM_RAW = 0x08,
     MULAW_RAW = 0x10,
-    ADPCM = (ADPCM_CUSTOM_PACKET | ADPCM_RAW),
     PCM = (PCM_CUSTOM_PACKET | PCM_RAW),
     MULAW = MULAW_RAW
 } st_capture_format_t;
@@ -283,13 +270,28 @@ typedef enum {
     ST_PLATFORM_LPI_DISABLE_AND_BARGE_IN
 } st_platform_lpi_enable_t;
 
+typedef enum {
+    ST_MODULE_TYPE_CUSTOM = 1,
+    ST_MODULE_TYPE_GMM = 3,
+    ST_MODULE_TYPE_PDK5 = 5
+} st_module_type_t;
+
+struct st_module_params {
+    struct listnode list_node;
+    int type;
+    int param_tag_tracker;
+    struct st_module_param_info params[MAX_PARAM_IDS];
+};
+
 struct st_lsm_params {
     struct listnode list_node;
     st_exec_mode_t exec_mode;
     int app_type;
+    int pdk5_app_type;
     int in_channels;
     int in_channels_lpi;
     int param_tag_tracker;
+    struct listnode module_params_list;
     struct st_module_param_info params[MAX_PARAM_IDS];
     st_profile_type_t adm_cfg_profile;
     audio_devices_t capture_device;
@@ -507,20 +509,11 @@ struct st_vendor_info* platform_stdev_get_vendor_info
 
 void platform_stdev_check_and_update_pcm_config
 (
-   void *platform,
    struct pcm_config *config,
-   struct st_vendor_info *v_info,
-   enum st_exec_mode exec_mode
+   struct st_vendor_info *v_info
 );
 
 int platform_stdev_get_hw_type(void *platform);
-
-int platform_cpe_get_pcm_device_id
-(
-   void *platform,
-   int sample_rate,
-   unsigned int* use_case_idx
-);
 
 int platform_ape_get_pcm_device_id
 (
@@ -529,12 +522,6 @@ int platform_ape_get_pcm_device_id
 );
 
 void platform_ape_free_pcm_device_id
-(
-   void *platform,
-   int pcm_id
-);
-
-void platform_cpe_free_pcm_device_id
 (
    void *platform,
    int pcm_id
@@ -671,6 +658,8 @@ void platform_stdev_check_and_update_ec_ref_config
 
 bool platform_get_lpi_mode(void *my_data);
 
+int platform_get_lpi_st_device(int st_device);
+
 void platform_stdev_reset_backend_cfg(void *platform);
 
 void platform_stdev_get_lpma_config
@@ -699,7 +688,8 @@ void platform_get_lsm_usecase
    struct st_vendor_info* v_info,
    struct st_lsm_params** lsm_usecase,
    st_exec_mode_t exec_mode,
-   bool lpi_enable
+   bool lpi_enable,
+   st_module_type_t sm_version
 );
 
 int platform_stdev_get_xml_version(void* platform);
