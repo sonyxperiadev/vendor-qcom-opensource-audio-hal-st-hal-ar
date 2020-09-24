@@ -37,7 +37,7 @@
 #include <hardware/sound_trigger.h>
 #include <cutils/properties.h>
 
-#include "QalDefs.h"
+#include "PalDefs.h"
 #include "SoundTriggerPropIntf.h"
 
 typedef enum {
@@ -66,17 +66,17 @@ class SoundTriggerSession {
     void GetRecognitionCallback(recognition_callback_t *callback);
 
  protected:
-    int OpenQALStream();
+    int OpenPALStream();
     int StopBuffering();
     void RegisterHalEvent(bool is_register);
     int ReadBuffer(void *buff, size_t buff_size, size_t *read_size);
 
     session_state_t state_;
     sound_model_handle_t sm_handle_;
-    qal_stream_handle_t *qal_handle_;
+    pal_stream_handle_t *pal_handle_;
     recognition_callback_t rec_callback_;
-    qal_param_payload *rec_config_payload_;
-    struct qal_st_recognition_config *rec_config_;
+    pal_param_payload *rec_config_payload_;
+    struct pal_st_recognition_config *rec_config_;
     audio_hw_call_back_t hal_callback_;
     void *cookie_;
 };

@@ -45,7 +45,7 @@
 #include <cutils/atomic.h>
 #include <utils/Trace.h>
 
-#include "QalApi.h"
+#include "PalApi.h"
 
 #define XSTR(x) STR(x)
 #define STR(x) #x
@@ -93,7 +93,7 @@ static int stdev_get_properties(const struct sound_trigger_hw_device *dev,
 {
     int status = 0;
     std::shared_ptr<SoundTriggerDevice> st_device = nullptr;
-    struct qal_st_properties *qstp = nullptr;
+    struct pal_st_properties *qstp = nullptr;
     size_t size = 0;
 
     ALOGV("%s: Enter", __func__);
@@ -109,10 +109,10 @@ static int stdev_get_properties(const struct sound_trigger_hw_device *dev,
         return -EINVAL;
     }
 
-    status =  qal_get_param(QAL_PARAM_ID_GET_SOUND_TRIGGER_PROPERTIES,
+    status =  pal_get_param(PAL_PARAM_ID_GET_SOUND_TRIGGER_PROPERTIES,
                   (void **)&qstp, &size, nullptr);
-    if (status || !qstp || size < sizeof(struct qal_st_properties)) {
-        ALOGE("%s: query properties from qal failed, status %d",
+    if (status || !qstp || size < sizeof(struct pal_st_properties)) {
+        ALOGE("%s: query properties from pal failed, status %d",
             __func__, status);
         goto exit;
     }

@@ -1,6 +1,6 @@
 ifneq ($(filter msmnile kona lahaina,$(TARGET_BOARD_PLATFORM)),)
 LOCAL_PATH := $(call my-dir)
-include $(LOCAL_PATH)/sthal-qal/Android.mk
+include $(LOCAL_PATH)/sthal-pal/Android.mk
 
 else
 ifeq ($(strip $(BOARD_SUPPORTS_OPENSOURCE_STHAL)),true)

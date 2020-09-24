@@ -27,14 +27,14 @@ LOCAL_SHARED_LIBRARIES := \
     libhidlbase \
     libprocessgroup \
     libutils \
-    libqal
+    libar-pal
 
 LOCAL_C_INCLUDES += \
     external/tinyalsa/include \
     system/media/audio_utils/include \
     external/expat/lib \
     vendor/qcom/opensource/core-utils/fwk-detect \
-    vendor/qcom/opensource/qal \
+    vendor/qcom/opensource/pal \
 
 LOCAL_MODULE := sound_trigger.primary.$(TARGET_BOARD_PLATFORM)
 LOCAL_MODULE_RELATIVE_PATH := hw
