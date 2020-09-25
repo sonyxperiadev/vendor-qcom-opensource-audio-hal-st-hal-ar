@@ -582,22 +582,12 @@ void SoundTriggerSession::RegisterHalEvent(bool is_register)
                   __func__, sm_handle_, rec_config_->capture_handle);
             event_info.st_ses.p_ses = (void *)pal_handle_;
             event_info.st_ses.capture_handle = rec_config_->capture_handle;
-            /*
-             * set pcm to nullptr as this version of st_hal doesn't pass pcm to
-             * audio HAL
-             */
-            event_info.st_ses.pcm = nullptr;
             hal_callback_(ST_EVENT_SESSION_REGISTER, &event_info);
         } else {
             ALOGD("%s:[c%d] ST_EVENT_SESSION_DEREGISTER capture_handle %d",
                   __func__, sm_handle_, rec_config_->capture_handle);
             event_info.st_ses.p_ses = (void *)pal_handle_;
             event_info.st_ses.capture_handle = rec_config_->capture_handle;
-            /*
-             * set pcm to nullptr as this version of st_hal doesn't pass pcm to
-             * audio HAL
-             */
-            event_info.st_ses.pcm = nullptr;
             hal_callback_(ST_EVENT_SESSION_DEREGISTER, &event_info);
         }
     }

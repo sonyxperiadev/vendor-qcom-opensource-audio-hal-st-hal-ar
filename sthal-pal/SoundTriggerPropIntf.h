@@ -3,7 +3,7 @@
  * Interface for sound trigger related communication
  * across modules.
  *
- * Copyright (c) 2014, 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014, 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -34,7 +34,6 @@
 #define SOUND_TRIGGER_PROP_INTF_H
 
 #include <hardware/sound_trigger.h>
-#include "tinyalsa/asoundlib.h"
 
 #define MAKE_HAL_VERSION(maj, min) ((((maj) & 0xff) << 8) | ((min) & 0xff))
 #define MAJOR_VERSION(ver) (((ver) & 0xff00) >> 8)
@@ -97,8 +96,6 @@ enum ssr_event_status {
 struct sound_trigger_session_info {
     void* p_ses; /* opaque pointer to st_session obj */
     int capture_handle;
-    struct pcm *pcm;
-    struct pcm_config config;
 };
 
 struct audio_read_samples_info {

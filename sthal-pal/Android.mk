@@ -30,7 +30,6 @@ LOCAL_SHARED_LIBRARIES := \
     libar-pal
 
 LOCAL_C_INCLUDES += \
-    external/tinyalsa/include \
     system/media/audio_utils/include \
     external/expat/lib \
     vendor/qcom/opensource/core-utils/fwk-detect \
