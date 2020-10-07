@@ -141,6 +141,7 @@ struct st_session_ev {
         char *chmix_coeff_str;
         bool enable;
         st_session_getparam_payload_t getparam;
+        char *module_version;
     } payload;
     st_session_t *stc_ses;
 };
@@ -389,9 +390,12 @@ static int merge_sound_models(struct sound_trigger_device *stdev,
     if (stdev->enable_debug_dumps) {
         ST_DBG_DECLARE(FILE *sm_fd = NULL; static int sm_cnt = 0);
         ST_DBG_FILE_OPEN_WR(sm_fd, ST_DEBUG_DUMP_LOCATION,
-            "st_smlib_output_merged_sm", "bin", sm_cnt++);
+            "st_smlib_output_merged_sm", "bin", sm_cnt);
         ST_DBG_FILE_WRITE(sm_fd, out_model->data, out_model->size);
         ST_DBG_FILE_CLOSE(sm_fd);
+        ALOGD("%s: SM returned from SML merge stored in: st_smlib_output_merged_sm_%d.bin",
+             __func__, sm_cnt);
+        sm_cnt++;
     }
     ALOGV("%s: Exit", __func__);
     return 0;
@@ -469,9 +473,12 @@ static int delete_from_merged_sound_model(struct sound_trigger_device *stdev,
     if (stdev->enable_debug_dumps && out_model->data && out_model->size) {
         ST_DBG_DECLARE(FILE *sm_fd = NULL; static int sm_cnt = 0);
         ST_DBG_FILE_OPEN_WR(sm_fd, ST_DEBUG_DUMP_LOCATION,
-            "st_smlib_output_deleted_sm", "bin", sm_cnt++);
+            "st_smlib_output_deleted_sm", "bin", sm_cnt);
         ST_DBG_FILE_WRITE(sm_fd, out_model->data, out_model->size);
         ST_DBG_FILE_CLOSE(sm_fd);
+        ALOGD("%s: SM returned from SML delete stored in: st_smlib_output_deleted_sm_%d.bin",
+             __func__, sm_cnt);
+        sm_cnt++;
     }
     return 0;
 
@@ -2471,11 +2478,14 @@ static int update_hw_config_on_start(st_session_t *stc_ses,
         ST_DBG_DECLARE(FILE *rc_opaque_fd = NULL;
             static int rc_opaque_cnt = 0);
         ST_DBG_FILE_OPEN_WR(rc_opaque_fd, ST_DEBUG_DUMP_LOCATION,
-            "rc_config_opaque_data", "bin", rc_opaque_cnt++);
+            "rc_config_opaque_data", "bin", rc_opaque_cnt);
         ST_DBG_FILE_WRITE(rc_opaque_fd,
             (uint8_t *)rc_config + rc_config->data_offset,
             rc_config->data_size);
         ST_DBG_FILE_CLOSE(rc_opaque_fd);
+        ALOGD("%s: rc_config opaque data dump stored in: rc_config_opaque_data_%d.bin",
+             __func__, rc_opaque_cnt);
+        rc_opaque_cnt++;
     }
 
     if (!st_hw_ses) {
@@ -2603,6 +2613,12 @@ static int update_hw_config_on_start(st_session_t *stc_ses,
         if (v_info->merge_fs_soundmodels) {
             /* merge_fs_soundmodels is true only for QC SVA UUID */
 
+            if (conf_levels == NULL) {
+                ALOGE("%s: Unexpected, conf_levels pointer is NULL",
+                      __func__);
+                status = -EINVAL;
+                return status;
+            }
              /*
               * Note:
               * For ADSP case, the generated conf levles size must be equal to
@@ -2653,13 +2669,11 @@ static int update_hw_config_on_start(st_session_t *stc_ses,
              * during only one remaining client model as there won't be a
              * merged model yet.
              */
-
-            /*
-             * User verification confidence is not required
-             * in SVA5 PDK_UV case. As first stage doesn't
-             * support user verification.
-             */
-            num_conf_levels = 1;
+            if (!conf_levels) {
+                ALOGE("%s: ERROR. conf levels alloc failed", __func__);
+                status = -ENOMEM;
+                return status;
+            }
             memcpy(stc_ses->sm_info.cf_levels, conf_levels,
                    stc_ses->sm_info.cf_levels_size);
 
@@ -2713,6 +2727,13 @@ static int update_hw_config_on_start(st_session_t *stc_ses,
 
 
     } else {
+        if (conf_levels == NULL) {
+                ALOGE("%s: Unexpected, conf_levels pointer is NULL",
+                      __func__);
+                status = -EINVAL;
+                return status;
+        }
+
         if (!st_ses->lab_enabled && enable_lab)
             st_ses->lab_enabled = true;
 
@@ -2723,6 +2744,13 @@ static int update_hw_config_on_start(st_session_t *stc_ses,
         sthw_cfg->client_req_preroll = stc_ses->preroll_duration;
         if (st_hw_ses->max_preroll < stc_ses->preroll_duration)
             st_hw_ses->max_preroll = stc_ses->preroll_duration;
+
+        /*
+         * User verification confidence is not required
+         * in SVA5 PDK_UV case. As first stage doesn't
+         * support user verification.
+         */
+        num_conf_levels = 1;
 
         /*
          * Cache it to use when client restarts without
@@ -3804,9 +3832,12 @@ int process_detection_event_keyphrase_v2(
                 ST_DBG_DECLARE(FILE *opaque_fd = NULL;
                     static int opaque_cnt = 0);
                 ST_DBG_FILE_OPEN_WR(opaque_fd, ST_DEBUG_DUMP_LOCATION,
-                    "detection_opaque_data", "bin", opaque_cnt++);
+                    "detection_opaque_data", "bin", opaque_cnt);
                 ST_DBG_FILE_WRITE(opaque_fd, opaque_data, opaque_size);
                 ST_DBG_FILE_CLOSE(opaque_fd);
+                ALOGD("%s: detection opaque data dump stored in: detection_opaque_data_%d.bin",
+                     __func__, opaque_cnt);
+                opaque_cnt++;
             }
         } else {
             status = parse_generic_event_without_opaque_data(st_ses, payload,
@@ -4012,10 +4043,13 @@ static int process_detection_event_keyphrase(
         if (st_ses->stdev->enable_debug_dumps) {
             ST_DBG_DECLARE(FILE *opaque_fd = NULL; static int opaque_cnt = 0);
             ST_DBG_FILE_OPEN_WR(opaque_fd, ST_DEBUG_DUMP_LOCATION,
-                                "detection_opaque_data", "bin", opaque_cnt++);
+                                "detection_opaque_data", "bin", opaque_cnt);
             ST_DBG_FILE_WRITE(opaque_fd, (opaque_data - opaque_size),
                               opaque_size);
             ST_DBG_FILE_CLOSE(opaque_fd);
+            ALOGD("%s: detection opaque data dump stored in: detection_opaque_data_%d.bin",
+                     __func__, opaque_cnt);
+            opaque_cnt++;
         }
 
     } else {
@@ -4320,6 +4354,7 @@ static void *aggregator_thread_loop(void *st_session)
                 ATRACE_ASYNC_END("sthal: detection success",
                     st_ses->sm_handle);
 
+                stc_ses->ss_det_count++;
                 status = process_detection_event(st_ses,
                     st_ses->det_session_ev->payload.detected.timestamp,
                     st_ses->det_session_ev->payload.detected.detect_status,
@@ -4348,7 +4383,7 @@ static void *aggregator_thread_loop(void *st_session)
                 capture_requested = stc_ses->rc_config->capture_requested;
                 cookie = stc_ses->cookie;
                 callback_time = get_current_time_ns();
-                ALOGD("%s:[c%d] Second stage detected successfully, "
+                ALOGD("%s:[c%d] Second stage detection SUCCESS, "
                     "calling client callback", __func__, stc_ses->sm_handle);
                 ALOGD("%s: Total sthal processing time: %llums", __func__,
                     (callback_time - st_ses->detection_event_time) /
@@ -4391,8 +4426,9 @@ static void *aggregator_thread_loop(void *st_session)
             } else {
                 ATRACE_ASYNC_END("sthal: detection reject",
                     st_ses->sm_handle);
-                ALOGD("%s: Second stage did NOT detect, restarting st_session",
-                    __func__);
+                stc_ses->ss_rej_count++;
+                ALOGD("%s: Second stage detection REJECT, count = %d, "
+                    "restarting st_session", __func__, stc_ses->ss_rej_count);
                 st_ses->hw_ses_current->fptrs->stop_buffering(
                     st_ses->hw_ses_current);
                 start_second_stage_for_client(stc_ses);
@@ -4749,6 +4785,7 @@ static int idle_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
     st_session_t *stc_ses = ev->stc_ses;
     st_hw_session_t *hw_ses = st_ses->hw_ses_current;
     struct st_proxy_ses_sm_info_wrapper *p_info = NULL;
+    struct version_arch_payload version_payload;
 
     /* skip parameter check as this is an internal funciton */
     ALOGD("%s:[c%d-%d] handle event id %d", __func__, stc_ses->sm_handle,
@@ -4855,7 +4892,30 @@ static int idle_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             __func__, st_ses->sm_handle);
         status = -EINVAL;
         break;
+    case ST_SES_EV_GET_MODULE_VERSION:
+        /* Open Dummy LSM session for google hotword during bootup */
 
+        status = hw_ses->fptrs->open_session(hw_ses);
+        if (status) {
+            ALOGE("%s: failed to start lsm session with error %d", __func__,
+                  status);
+            break;
+        }
+
+        status = hw_ses->fptrs->get_module_version(hw_ses, &version_payload,
+                                        sizeof(struct version_arch_payload));
+
+        if (status) {
+            ALOGE("%s: failed to get module version %d", __func__,
+                  status);
+            hw_ses->fptrs->close_session(hw_ses);
+            break;
+        }
+        hw_ses->fptrs->close_session(hw_ses);
+        snprintf(ev->payload.module_version, SOUND_TRIGGER_MAX_STRING_LEN, "%d, %s",
+                 version_payload.version, version_payload.arch);
+
+        break;
     default:
         ALOGD("%s:[%d] unhandled event", __func__, st_ses->sm_handle);
         break;
@@ -5322,6 +5382,7 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
             pthread_mutex_unlock(&st_ses->lock);
             break;
         }
+        stc_ses->fs_det_count++;
         st_ses->det_stc_ses = stc_ses;
         st_ses->hw_ses_current->enable_second_stage = false; /* Initialize */
         stc_ses->detection_sent = false;
@@ -5383,9 +5444,13 @@ static int active_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
         if (!status && st_ses->lab_enabled) {
             if (stc_ses->rc_config->capture_requested ||
                 !list_empty(&stc_ses->second_stage_list)) {
-                if (st_ses->stdev->enable_debug_dumps) {
+                if (st_ses->stdev->enable_debug_dumps &&
+                    stc_ses->rc_config->capture_requested) {
                     ST_DBG_FILE_OPEN_WR(st_ses->lab_fp, ST_DEBUG_DUMP_LOCATION,
-                        "lab_capture", "bin", file_cnt++);
+                        "lab_capture", "bin", file_cnt);
+                    ALOGD("%s: Voice Request stored in: lab_capture_%d.bin",
+                        __func__, file_cnt);
+                    file_cnt++;
                 }
                 STATE_TRANSITION(st_ses, buffering_state_fn);
                 lab_enabled = true;
@@ -5762,10 +5827,10 @@ static int buffering_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
         /* Note: this function may block if there is no PCM data ready*/
         hw_ses->fptrs->read_pcm(hw_ses, ev->payload.readpcm.out_buff,
             ev->payload.readpcm.out_buff_size);
-        if (st_ses->stdev->enable_debug_dumps) {
+        if (st_ses->stdev->enable_debug_dumps &&
+            stc_ses->rc_config->capture_requested)
             ST_DBG_FILE_WRITE(st_ses->lab_fp, ev->payload.readpcm.out_buff,
                 ev->payload.readpcm.out_buff_size);
-        }
         break;
     case ST_SES_EV_END_BUFFERING:
         if (stc_ses == st_ses->det_stc_ses) {
@@ -5807,7 +5872,8 @@ static int buffering_state_fn(st_proxy_session_t *st_ses, st_session_ev_t *ev)
         hw_ses->fptrs->stop_buffering(hw_ses);
         STATE_TRANSITION(st_ses, active_state_fn);
         DISPATCH_EVENT(st_ses, *ev, status);
-        if (st_ses->stdev->enable_debug_dumps)
+        if (st_ses->stdev->enable_debug_dumps &&
+            stc_ses->rc_config->capture_requested)
             ST_DBG_FILE_CLOSE(st_ses->lab_fp);
         break;
 
@@ -6783,6 +6849,23 @@ int st_session_request_detection(st_session_t *stc_ses)
     st_session_ev_t ev = {.ev_id = ST_SES_EV_REQUEST_DET, .stc_ses = stc_ses};
 
     /* lock to serialize event handling */
+    pthread_mutex_lock(&st_ses->lock);
+    DISPATCH_EVENT(st_ses, ev, status);
+    pthread_mutex_unlock(&st_ses->lock);
+    return status;
+}
+
+int st_session_get_module_version(st_session_t *stc_ses, char version[])
+{
+    int status = 0;
+
+    if (!stc_ses || !stc_ses->hw_proxy_ses)
+        return -EINVAL;
+
+    st_proxy_session_t *st_ses = stc_ses->hw_proxy_ses;
+    st_session_ev_t ev = { .ev_id = ST_SES_EV_GET_MODULE_VERSION, .stc_ses = stc_ses,
+                           .payload.module_version = version};
+
     pthread_mutex_lock(&st_ses->lock);
     DISPATCH_EVENT(st_ses, ev, status);
     pthread_mutex_unlock(&st_ses->lock);
