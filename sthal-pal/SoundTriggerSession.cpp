@@ -398,7 +398,8 @@ exit:
 int SoundTriggerSession::StartRecognition(
     const struct sound_trigger_recognition_config *config,
     recognition_callback_t callback,
-    void *cookie)
+    void *cookie,
+    uint32_t version)
 {
     int status = 0;
     unsigned int size = 0;
@@ -443,9 +444,16 @@ int SoundTriggerSession::StartRecognition(
     rec_config_->data_size = config->data_size;
     rec_config_->data_offset = sizeof(struct pal_st_recognition_config);
     rec_config_->cookie = this;
-    memcpy((uint8_t *)rec_config_ + rec_config_->data_offset,
-           (uint8_t *)config + config->data_offset,
-           rec_config_->data_size);
+    if (version == SOUND_TRIGGER_DEVICE_API_VERSION_1_3) {
+        memcpy((uint8_t *)rec_config_ + rec_config_->data_offset,
+            (uint8_t *)config + config->data_offset -
+            sizeof(struct sound_trigger_recognition_config_header),
+            rec_config_->data_size);
+    } else {
+        memcpy((uint8_t *)rec_config_ + rec_config_->data_offset,
+            (uint8_t *)config + config->data_offset,
+            rec_config_->data_size);
+    }
 
     // set recognition config
     status = pal_stream_set_param(pal_handle_,
@@ -606,6 +614,34 @@ int SoundTriggerSession::GetCaptureHandle()
         handle = rec_config_->capture_handle;
 
     return handle;
+}
+
+int SoundTriggerSession::GetModuleVersion(char version[])
+{
+    int status = 0;
+    pal_param_payload *param_payload = nullptr;
+    struct version_arch_payload *version_payload = nullptr;
+
+    ALOGV("%s: Enter", __func__);
+    status = OpenPALStream();
+    if (status) {
+        ALOGE("%s: Failed to open pal stream, status = %d", __func__, status);
+        return status;
+    }
+
+    status = pal_stream_get_param(pal_handle_,
+        PAL_PARAM_ID_WAKEUP_MODULE_VERSION, &param_payload);
+    if (status) {
+        ALOGE("%s: Failed to get version, status = %d", __func__, status);
+        return status;
+    }
+
+    version_payload = (struct version_arch_payload *)param_payload;
+    snprintf(version, SOUND_TRIGGER_MAX_STRING_LEN, "%d, %s",
+        version_payload->version, version_payload->arch);
+
+    ALOGV("%s: Exit", __func__);
+    return 0;
 }
 
 void *SoundTriggerSession::GetCookie()

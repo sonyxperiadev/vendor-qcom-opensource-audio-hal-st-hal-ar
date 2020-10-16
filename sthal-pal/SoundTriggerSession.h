@@ -52,16 +52,17 @@ typedef enum {
 
 class SoundTriggerSession {
  public:
-    ~SoundTriggerSession();
+    ~SoundTriggerSession() {}
     SoundTriggerSession(sound_model_handle_t handle,
         audio_hw_call_back_t callback);
     int LoadSoundModel(struct sound_trigger_sound_model *sound_model);
     int UnloadSoundModel();
     int StartRecognition(const struct sound_trigger_recognition_config *config,
-                            recognition_callback_t callback, void *cookie);
+        recognition_callback_t callback, void *cookie, uint32_t version);
     int StopRecognition();
     sound_model_handle_t GetSoundModelHandle();
     int GetCaptureHandle();
+    int GetModuleVersion(char version[]);
     void *GetCookie();
     void GetRecognitionCallback(recognition_callback_t *callback);
 

@@ -51,6 +51,7 @@
 #define STR(x) #x
 
 static int stdev_ref_cnt = 0;
+static struct sound_trigger_properties_extended_1_3 hw_properties_extended;
 
 /*
  * Current API version used by STHAL. Queried by AHAL
@@ -123,6 +124,7 @@ static int stdev_get_properties(const struct sound_trigger_hw_device *dev,
            "concurrent_capture=%d", __func__, properties->version,
            properties->recognition_modes, properties->capture_transition,
            properties->concurrent_capture);
+    hw_properties_extended.header.version = SOUND_TRIGGER_DEVICE_API_VERSION_1_0;
 
 exit:
     if (qstp)
@@ -252,7 +254,8 @@ static int stdev_start_recognition
         goto exit;
     }
 
-    status = st_session->StartRecognition(config, callback, cookie);
+    status = st_session->StartRecognition(config,
+        callback, cookie, hw_properties_extended.header.version);
     if (status) {
         ALOGE("%s: error, failed to start recognition, status = %d",
               __func__, status);
@@ -314,6 +317,94 @@ static int stdev_get_model_state(const struct sound_trigger_hw_device *dev,
 }
 #endif
 
+static int stdev_start_recognition_extended
+(
+    const struct sound_trigger_hw_device *dev,
+    sound_model_handle_t sound_model_handle,
+    const struct sound_trigger_recognition_config_header *config,
+    recognition_callback_t callback,
+    void *cookie
+)
+{
+    return stdev_start_recognition(dev, sound_model_handle,
+           &((struct sound_trigger_recognition_config_extended_1_3 *)config)->base,
+           callback, cookie);
+}
+
+static int stdev_stop_all_recognitions(const struct sound_trigger_hw_device* dev __unused)
+{
+    ALOGV("%s: unsupported API", __func__);
+    return -ENOSYS;
+}
+
+static int stdev_get_parameter(const struct sound_trigger_hw_device *dev __unused,
+    sound_model_handle_t sound_model_handle __unused,
+    sound_trigger_model_parameter_t model_param __unused, int32_t* value __unused)
+{
+    ALOGV("%s: unsupported API", __func__);
+    return -EINVAL;
+}
+
+static int stdev_set_parameter(const struct sound_trigger_hw_device *dev __unused,
+    sound_model_handle_t sound_model_handle __unused,
+    sound_trigger_model_parameter_t model_param __unused, int32_t value __unused)
+{
+    ALOGV("%s: unsupported API", __func__);
+    return -EINVAL;
+}
+
+static int stdev_query_parameter(const struct sound_trigger_hw_device *dev __unused,
+    sound_model_handle_t sound_model_handle __unused,
+    sound_trigger_model_parameter_t  model_param __unused,
+    sound_trigger_model_parameter_range_t* param_range)
+{
+    if (param_range)
+        param_range->is_supported = false;
+    return 0;
+}
+
+static const struct sound_trigger_properties_header*
+stdev_get_properties_extended(const struct sound_trigger_hw_device *dev)
+{
+    int status = 0;
+    struct sound_trigger_properties_header *prop_hdr = NULL;
+    std::shared_ptr<SoundTriggerDevice> st_device = nullptr;
+    SoundTriggerSession* st_session = nullptr;
+
+    ALOGV("%s: Enter", __func__);
+    if (!dev) {
+        ALOGW("%s: invalid sound_trigger_hw_device received", __func__);
+        return nullptr;
+    }
+
+    st_device = SoundTriggerDevice::GetInstance(dev);
+    if (!st_device) {
+        ALOGE("%s: error, GetInstance failed", __func__);
+        return nullptr;
+    }
+
+    prop_hdr = (struct sound_trigger_properties_header *)&hw_properties_extended;
+    status = stdev_get_properties(dev, &hw_properties_extended.base);
+    if (status) {
+        ALOGW("%s: Failed to initialize the stdev properties", __func__);
+        return nullptr;
+    }
+    hw_properties_extended.header.size = sizeof(struct sound_trigger_properties_extended_1_3);
+    hw_properties_extended.audio_capabilities = 0;
+    hw_properties_extended.header.version = SOUND_TRIGGER_DEVICE_API_VERSION_1_3;
+
+    // TODO: update first stage module version after confirm with Venky
+    st_session = new SoundTriggerSession(0, nullptr);
+    status = st_session->GetModuleVersion(hw_properties_extended.supported_model_arch);
+    delete st_session;
+    if (status) {
+        ALOGE("%s: Failed to get module version, status = %d", __func__, status);
+        return nullptr;
+    }
+
+    return prop_hdr;
+}
+
 std::shared_ptr<SoundTriggerDevice> SoundTriggerDevice::GetInstance()
 {
     if (!stdev_) {
@@ -373,7 +464,7 @@ int SoundTriggerDevice::Init(hw_device_t **device, const hw_module_t *module)
 
     // assign function pointers
     device_->common.tag = HARDWARE_DEVICE_TAG;
-    device_->common.version = SOUND_TRIGGER_DEVICE_API_VERSION_1_0;
+    device_->common.version = SOUND_TRIGGER_DEVICE_API_VERSION_1_3;
     device_->common.module = (struct hw_module_t *)module;
     device_->common.close = stdev_close;
     device_->get_properties = stdev_get_properties;
@@ -381,10 +472,22 @@ int SoundTriggerDevice::Init(hw_device_t **device, const hw_module_t *module)
     device_->unload_sound_model = stdev_unload_sound_model;
     device_->start_recognition = stdev_start_recognition;
     device_->stop_recognition = stdev_stop_recognition;
+    device_->get_properties_extended = stdev_get_properties_extended;
+    device_->start_recognition_extended = stdev_start_recognition_extended;
+    device_->stop_all_recognitions = stdev_stop_all_recognitions;
+    device_->get_parameter = stdev_get_parameter;
+    device_->set_parameter = stdev_set_parameter;
+    device_->query_parameter = stdev_query_parameter;
 #ifdef ST_SUPPORT_GET_MODEL_STATE
     device_->get_model_state = stdev_get_model_state;
 #endif
     *device = &device_->common;
+
+    hw_properties_extended.header.size =
+        sizeof(struct sound_trigger_properties_extended_1_3);
+    hw_properties_extended.audio_capabilities = 0;
+    hw_properties_extended.header.version =
+        SOUND_TRIGGER_DEVICE_API_VERSION_1_3;
 
     available_devices_ = AUDIO_DEVICE_IN_BUILTIN_MIC;
     session_id_ = 1;

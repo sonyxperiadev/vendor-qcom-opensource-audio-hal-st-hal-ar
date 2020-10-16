@@ -88,7 +88,7 @@ class SoundTriggerDevice {
 
  protected:
     static std::shared_ptr<SoundTriggerDevice> stdev_;
-    static std::shared_ptr<sound_trigger_hw_device> device_;
+    static std::shared_ptr<struct sound_trigger_hw_device> device_;
     struct sound_trigger_properties *hw_properties_;
     std::vector<SoundTriggerSession *> session_list_;
     std::mutex mutex_;
