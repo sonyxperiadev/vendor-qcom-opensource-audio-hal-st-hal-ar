@@ -62,7 +62,7 @@ static int32_t pal_callback(
     uint32_t event_id,
     uint32_t *event_data,
     uint32_t event_size,
-    void *cookie)
+    uint64_t cookie)
 {
     int32_t status = 0;
     unsigned int size = 0;
@@ -76,7 +76,7 @@ static int32_t pal_callback(
     struct pal_st_phrase_recognition_event *pal_pharse_event = nullptr;
 
     ALOGD("%s: stream_handle (%p), event_id (%x), event_data (%p) event_size (%d),"
-           "cookie (%p)", __func__, stream_handle, event_id, event_data, event_size,
+           "cookie (%" PRIu64 ")", __func__, stream_handle, event_id, event_data, event_size,
            cookie);
 
     if (!stream_handle || !event_data) {
@@ -208,7 +208,7 @@ int SoundTriggerSession::OpenPALStream()
                              0,
                              nullptr,
                              &pal_callback,
-                             (void *)this,
+                             (uint64_t)this,
                              &pal_handle_);
 
     ALOGD("%s:(%x:status)%d", __func__, status, __LINE__);
@@ -443,7 +443,7 @@ int SoundTriggerSession::StartRecognition(
     }
     rec_config_->data_size = config->data_size;
     rec_config_->data_offset = sizeof(struct pal_st_recognition_config);
-    rec_config_->cookie = this;
+    rec_config_->cookie = (uint8_t *)this;
     if (version == SOUND_TRIGGER_DEVICE_API_VERSION_1_3) {
         memcpy((uint8_t *)rec_config_ + rec_config_->data_offset,
             (uint8_t *)config + config->data_offset -
@@ -558,7 +558,7 @@ int SoundTriggerSession::ReadBuffer(
 
     memset(&buffer, 0, sizeof(struct pal_buffer));
 
-    buffer.buffer = buff;
+    buffer.buffer = (uint8_t *)buff;
     buffer.size = buff_size;
     while (retry_count--) {
         size = pal_stream_read(pal_handle_, &buffer);
