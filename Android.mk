@@ -1,5 +1,5 @@
 ifneq ($(AUDIO_USE_STUB_HAL), true)
-ifneq ($(filter msmnile kona lahaina,$(TARGET_BOARD_PLATFORM)),)
+ifneq ($(filter msmnile kona lahaina taro,$(TARGET_BOARD_PLATFORM)),)
 LOCAL_PATH := $(call my-dir)
 include $(LOCAL_PATH)/sthal-pal/Android.mk
 
