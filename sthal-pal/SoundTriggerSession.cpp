@@ -626,20 +626,28 @@ int SoundTriggerSession::GetModuleVersion(char version[])
     status = OpenPALStream();
     if (status) {
         ALOGE("%s: Failed to open pal stream, status = %d", __func__, status);
-        return status;
+        goto exit;
     }
 
     status = pal_stream_get_param(pal_handle_,
         PAL_PARAM_ID_WAKEUP_MODULE_VERSION, &param_payload);
     if (status) {
         ALOGE("%s: Failed to get version, status = %d", __func__, status);
-        return status;
+        goto exit;
     }
 
     version_payload = (struct version_arch_payload *)param_payload;
     snprintf(version, SOUND_TRIGGER_MAX_STRING_LEN, "%d, %s",
         version_payload->version, version_payload->arch);
 
+exit:
+    if (pal_handle_) {
+        status = pal_stream_close(pal_handle_);
+        if (status) {
+            ALOGE("%s: error, failed to close pal stream, status = %d",
+                __func__, status);
+        }
+    }
     ALOGV("%s: Exit", __func__);
     return 0;
 }

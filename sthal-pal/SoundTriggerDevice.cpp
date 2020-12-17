@@ -399,7 +399,6 @@ stdev_get_properties_extended(const struct sound_trigger_hw_device *dev)
     delete st_session;
     if (status) {
         ALOGE("%s: Failed to get module version, status = %d", __func__, status);
-        return nullptr;
     }
 
     return prop_hdr;
