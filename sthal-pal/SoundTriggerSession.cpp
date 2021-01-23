@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -41,7 +41,7 @@
 
 #include <log/log.h>
 #include <utils/Trace.h>
-
+#include <cstring>
 #include <chrono>
 #include <thread>
 
@@ -176,7 +176,21 @@ exit:
     return status;
 }
 
-int SoundTriggerSession::OpenPALStream()
+bool SoundTriggerSession::IsACDSoundModel(struct sound_trigger_sound_model *sound_model)
+{
+    //todo: get this from PAL instead of hardcoding.
+    const sound_trigger_uuid_t qc_acd_uuid = { 0x4e93281b, 0x296e, 0x4d73, 0x9833,
+                                              { 0x27, 0x10, 0xc3, 0xc7, 0xc1, 0xdb } };
+
+    if (sound_model &&
+        !std::memcmp(&sound_model->vendor_uuid, &qc_acd_uuid,
+                     sizeof(sound_trigger_uuid_t)))
+        return true;
+    else
+        return false;
+}
+
+int SoundTriggerSession::OpenPALStream(pal_stream_type_t stream_type)
 {
     int status = 0;
     struct pal_stream_attributes stream_attributes;
@@ -192,7 +206,7 @@ int SoundTriggerSession::OpenPALStream()
     device.config.ch_info.ch_map[1] = PAL_CHMAP_CHANNEL_FR;
     device.config.aud_fmt_id = PAL_AUDIO_FMT_DEFAULT_PCM;
 
-    stream_attributes.type = PAL_STREAM_VOICE_UI;
+    stream_attributes.type = stream_type;
     stream_attributes.flags = (pal_stream_flags_t)0;
     stream_attributes.direction = PAL_AUDIO_INPUT;
     stream_attributes.in_media_config.sample_rate = 16000;
@@ -235,11 +249,15 @@ int SoundTriggerSession::LoadSoundModel(
     struct sound_trigger_phrase_sound_model *phrase_sm = nullptr;
     pal_param_payload *param_payload = nullptr;
     unsigned int size = 0;
+    pal_stream_type_t stream_type = PAL_STREAM_VOICE_UI;
 
     ALOGV("%s: Enter", __func__);
 
+    if (IsACDSoundModel(sound_model))
+        stream_type = PAL_STREAM_ACD;
+
     // open pal stream
-    status = OpenPALStream();
+    status = OpenPALStream(stream_type);
     if (status) {
         ALOGE("%s: error, failed to open PAL stream", __func__);
         goto exit;
@@ -248,8 +266,9 @@ int SoundTriggerSession::LoadSoundModel(
     // parse sound model into pal_sound_model
     if (sound_model->type == SOUND_MODEL_TYPE_GENERIC) {
         common_sm = sound_model;
-        if (!common_sm->data_size ||
-            (common_sm->data_offset < sizeof(*common_sm))) {
+        if ((stream_type != PAL_STREAM_ACD) &&
+            (!common_sm->data_size ||
+            (common_sm->data_offset < sizeof(*common_sm)))) {
             ALOGE("%s: Invalid Generic sound model params "
                   "data size=%d, data offset=%d", __func__,
                   common_sm->data_size, common_sm->data_offset);
@@ -276,9 +295,13 @@ int SoundTriggerSession::LoadSoundModel(
                sizeof(struct st_uuid));
         pal_common_sm->data_size = common_sm->data_size;
         pal_common_sm->data_offset = sizeof(struct pal_st_sound_model);
-        memcpy((uint8_t *)pal_common_sm + pal_common_sm->data_offset,
-               (uint8_t *)common_sm + common_sm->data_offset,
-               pal_common_sm->data_size);
+
+        // data_size is zero for ACD streams and non-zero for other streams
+        if (pal_common_sm->data_size)
+            memcpy((uint8_t *)pal_common_sm + pal_common_sm->data_offset,
+                   (uint8_t *)common_sm + common_sm->data_offset,
+                   pal_common_sm->data_size);
+
     } else if (sound_model->type == SOUND_MODEL_TYPE_KEYPHRASE) {
         phrase_sm = (struct sound_trigger_phrase_sound_model *)sound_model;
         if ((phrase_sm->common.data_size == 0) ||
@@ -623,7 +646,7 @@ int SoundTriggerSession::GetModuleVersion(char version[])
     struct version_arch_payload *version_payload = nullptr;
 
     ALOGV("%s: Enter", __func__);
-    status = OpenPALStream();
+    status = OpenPALStream(PAL_STREAM_VOICE_UI);
     if (status) {
         ALOGE("%s: Failed to open pal stream, status = %d", __func__, status);
         goto exit;

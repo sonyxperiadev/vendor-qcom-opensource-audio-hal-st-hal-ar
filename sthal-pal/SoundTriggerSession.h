@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019, 2021 The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -67,7 +67,8 @@ class SoundTriggerSession {
     void GetRecognitionCallback(recognition_callback_t *callback);
 
  protected:
-    int OpenPALStream();
+    int OpenPALStream(pal_stream_type_t stream_type);
+    bool IsACDSoundModel(struct sound_trigger_sound_model *sound_model);
     int StopBuffering();
     void RegisterHalEvent(bool is_register);
     int ReadBuffer(void *buff, size_t buff_size, size_t *read_size);
