@@ -1,6 +1,6 @@
 /* sound_trigger_platform.h
  *
- * Copyright (c) 2013-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2021, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -55,7 +55,7 @@ struct sound_trigger_device;
 #define MIXER_PATH_FILE_NAME_BG "sound_trigger_mixer_paths_bg"
 #define LIB_ACDB_LOADER "libacdbloader.so"
 #define LIB_MULAW_DECODER "libmulawdec.so"
-#define LIB_SVA_SOUNDMODEL "liblistensoundmodel2.so"
+#define LIB_SVA_SOUNDMODEL "liblistensoundmodel2vendor.so"
 
 #define BUF_SIZE 1024
 
