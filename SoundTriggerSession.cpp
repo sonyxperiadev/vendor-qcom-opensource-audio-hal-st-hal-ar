@@ -398,6 +398,9 @@ int SoundTriggerSession::UnloadSoundModel()
 
     ALOGV("%s: Enter", __func__);
 
+    if (state_ == ACTIVE)
+        RegisterHalEvent(false);
+
     status = pal_stream_close(pal_handle_);
     if (status) {
         ALOGE("%s: error, failed to close pal stream, status = %d",
