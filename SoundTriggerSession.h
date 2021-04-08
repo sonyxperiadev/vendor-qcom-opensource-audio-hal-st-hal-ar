@@ -30,6 +30,8 @@
 #ifndef SOUND_TRIGGER_SESSION_H
 #define SOUND_TRIGGER_SESSION_H
 
+#include <mutex>
+
 #include <stdlib.h>
 #include <cutils/list.h>
 #include <pthread.h>
@@ -69,9 +71,11 @@ class SoundTriggerSession {
  protected:
     int OpenPALStream(pal_stream_type_t stream_type);
     bool IsACDSoundModel(struct sound_trigger_sound_model *sound_model);
-    int StopBuffering();
     void RegisterHalEvent(bool is_register);
-    int ReadBuffer(void *buff, size_t buff_size, size_t *read_size);
+    static int pal_callback(pal_stream_handle_t *stream_handle,
+        uint32_t event_id, uint32_t *event_data,
+        uint32_t event_size, uint64_t cookie);
+    int StopRecognition_l();
 
     session_state_t state_;
     sound_model_handle_t sm_handle_;
@@ -81,6 +85,7 @@ class SoundTriggerSession {
     struct pal_st_recognition_config *rec_config_;
     audio_hw_call_back_t hal_callback_;
     void *cookie_;
+    std::mutex ses_mutex_;
 };
 
 #endif  // SOUND_TRIGGER_SESSION_H

@@ -57,7 +57,7 @@ SoundTriggerSession::SoundTriggerSession(sound_model_handle_t handle,
     hal_callback_ = callback;
 }
 
-static int32_t pal_callback(
+int SoundTriggerSession::pal_callback(
     pal_stream_handle_t *stream_handle,
     uint32_t event_id,
     uint32_t *event_data,
@@ -65,6 +65,7 @@ static int32_t pal_callback(
     uint64_t cookie)
 {
     int32_t status = 0;
+    bool lock_status = false;
     unsigned int size = 0;
     int i = 0;
     int j = 0;
@@ -75,13 +76,29 @@ static int32_t pal_callback(
     struct sound_trigger_phrase_recognition_event *pharse_event = nullptr;
     struct pal_st_phrase_recognition_event *pal_pharse_event = nullptr;
 
-    ALOGD("%s: stream_handle (%p), event_id (%x), event_data (%p) event_size (%d),"
-           "cookie (%" PRIu64 ")", __func__, stream_handle, event_id, event_data, event_size,
-           cookie);
-
     if (!stream_handle || !event_data) {
         status = -EINVAL;
         ALOGE("%s: error, invalid stream handle or event data", __func__);
+        goto exit;
+    }
+
+    ALOGD("%s: stream_handle (%p), event_id (%x), event_size (%d),"
+        "cookie (%" PRIu64 ")", __func__, stream_handle, event_id,
+        event_size, cookie);
+
+    session = (SoundTriggerSession *)cookie;
+    /*
+     * Sometimes Client may call unload directly, which may get blocked
+     * in PAL when releasing second stage engine thread, as it is waiting
+     * for this callback to finish. Check if session state changes to non
+     * ACTIVE state.
+     */
+    do {
+        lock_status = session->ses_mutex_.try_lock();
+    } while(!lock_status && (session->state_ == ACTIVE));
+
+    if (session->state_ != ACTIVE) {
+        ALOGW("%s: skip notification as client has stopped", __func__);
         goto exit;
     }
 
@@ -140,7 +157,6 @@ static int32_t pal_callback(
         goto exit;
     }
 
-    session = (SoundTriggerSession *)cookie;
     // copy members inside structrue
     st_event->status = event->status;
     st_event->type = (sound_trigger_sound_model_type_t)event->type;
@@ -154,7 +170,6 @@ static int32_t pal_callback(
     st_event->audio_config.sample_rate = event->media_config.sample_rate;
     st_event->audio_config.channel_mask = AUDIO_CHANNEL_OUT_FRONT_LEFT;
     st_event->audio_config.format = AUDIO_FORMAT_PCM_16_BIT;
-    // st_event->audio_config.frame_count = 4096;
 
     st_event->data_size = event->data_size;
 
@@ -165,6 +180,8 @@ static int32_t pal_callback(
 
     // callback to SoundTriggerService
     session->GetRecognitionCallback(&callback);
+    session->ses_mutex_.unlock();
+    lock_status = false;
     ATRACE_BEGIN("sthal: client detection callback");
     callback(st_event, session->GetCookie());
     ATRACE_END();
@@ -175,6 +192,8 @@ exit:
         free(pharse_event);
     else if (st_event)
         free(st_event);
+    if (lock_status)
+        session->ses_mutex_.unlock();
     ALOGV("%s: Exit, status %d", __func__, status);
 
     return status;
@@ -243,6 +262,34 @@ exit:
     return status;
 }
 
+int SoundTriggerSession::StopRecognition_l()
+{
+    int status = 0;
+
+    ALOGV("%s: Enter", __func__);
+
+    // deregister from audio hal
+    RegisterHalEvent(false);
+
+    // stop pal stream
+    status = pal_stream_stop(pal_handle_);
+    if (status) {
+        ALOGE("%s: error, failed to stop pal stream, status = %d",
+              __func__, status);
+    }
+
+    if (rec_config_payload_) {
+        free(rec_config_payload_);
+        rec_config_payload_ = nullptr;
+    }
+    rec_config_ = nullptr;
+
+    state_ = STOPPED;
+    ALOGV("%s: Exit, status = %d", __func__, status);
+
+    return status;
+}
+
 int SoundTriggerSession::LoadSoundModel(
     struct sound_trigger_sound_model *sound_model)
 {
@@ -256,6 +303,7 @@ int SoundTriggerSession::LoadSoundModel(
     pal_stream_type_t stream_type = PAL_STREAM_VOICE_UI;
 
     ALOGV("%s: Enter", __func__);
+    std::lock_guard<std::mutex> lck(ses_mutex_);
 
     if (IsACDSoundModel(sound_model))
         stream_type = PAL_STREAM_ACD;
@@ -401,9 +449,14 @@ int SoundTriggerSession::UnloadSoundModel()
     int status = 0;
 
     ALOGV("%s: Enter", __func__);
-
-    if (state_ == ACTIVE)
-        RegisterHalEvent(false);
+    std::lock_guard<std::mutex> lck(ses_mutex_);
+    if (state_ == ACTIVE) {
+        status = StopRecognition_l();
+        if (status) {
+            ALOGE("%s: error, failed to stop recognition, status = %d",
+                __func__, status);
+        }
+    }
 
     status = pal_stream_close(pal_handle_);
     if (status) {
@@ -435,6 +488,7 @@ int SoundTriggerSession::StartRecognition(
     unsigned int size = 0;
 
     ALOGV("%s: Enter, state = %d", __func__, state_);
+    std::lock_guard<std::mutex> lck(ses_mutex_);
 
     if (rec_config_payload_) {
         free(rec_config_payload_); // valid due to subsequent start after a detection
@@ -527,6 +581,7 @@ int SoundTriggerSession::StopRecognition()
     int status = 0;
 
     ALOGV("%s: Enter", __func__);
+    std::lock_guard<std::mutex> lck(ses_mutex_);
 
     // deregister from audio hal
     RegisterHalEvent(false);
@@ -536,7 +591,6 @@ int SoundTriggerSession::StopRecognition()
     if (status) {
         ALOGE("%s: error, failed to stop pal stream, status = %d",
               __func__, status);
-        goto exit;
     }
 
     if (rec_config_payload_) {
@@ -545,67 +599,8 @@ int SoundTriggerSession::StopRecognition()
     }
     rec_config_ = nullptr;
 
-exit:
     state_ = STOPPED;
     ALOGV("%s: Exit, status = %d", __func__, status);
-
-    return status;
-}
-
-int SoundTriggerSession::StopBuffering()
-{
-    int status = 0;
-    pal_param_payload payload;
-    ALOGD("%s: Enter, this = %p", __func__, (void *)this);
-
-    status = pal_stream_set_param(pal_handle_,
-                                  PAL_PARAM_ID_STOP_BUFFERING,
-                                  &payload);
-    if (status) {
-        ALOGE("%s: error, failed to stop buffering, status = %d",
-              __func__, status);
-        goto exit;
-    }
-
-exit:
-    state_ = ACTIVE;
-    ALOGV("%s: Exit, status = %d", __func__, status);
-
-    return status;
-}
-
-int SoundTriggerSession::ReadBuffer(
-    void *buff,
-    size_t buff_size,
-    size_t *read_size)
-{
-    int status = 0;
-    int retry_count = 25;
-    struct pal_buffer buffer;
-    size_t size;
-
-    ALOGV("%s: Enter, this = %p", __func__, (void *)this);
-
-    memset(&buffer, 0, sizeof(struct pal_buffer));
-
-    buffer.buffer = (uint8_t *)buff;
-    buffer.size = buff_size;
-    while (retry_count--) {
-        size = pal_stream_read(pal_handle_, &buffer);
-        if (size < 0) {
-            ALOGE("%s: error, failed to read data from PAL", __func__);
-            status = size;
-            goto exit;
-        } else if (size == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        } else {
-            break;
-        }
-    }
-    *read_size = (size_t)size;
-
-exit:
-    ALOGV("%s: Exit, status = %d, read size = %zu", __func__, status, size);
 
     return status;
 }
@@ -653,6 +648,7 @@ int SoundTriggerSession::GetModuleVersion(char version[])
     struct version_arch_payload *version_payload = nullptr;
 
     ALOGV("%s: Enter", __func__);
+    std::lock_guard<std::mutex> lck(ses_mutex_);
     status = OpenPALStream(PAL_STREAM_VOICE_UI);
     if (status) {
         ALOGE("%s: Failed to open pal stream, status = %d", __func__, status);
