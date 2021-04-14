@@ -134,6 +134,10 @@ static int32_t pal_callback(
                     pal_pharse_event->phrase_extras[i].levels[j].level;
             }
         }
+    } else {
+        ALOGE("%s: Invalid event type :%d", __func__, event->type);
+        status = -EINVAL;
+        goto exit;
     }
 
     session = (SoundTriggerSession *)cookie;

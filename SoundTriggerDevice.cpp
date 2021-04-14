@@ -554,8 +554,10 @@ int SoundTriggerDevice::LoadAudioHal()
     return status;
 
 error:
-    dlclose(ahal_handle_);
-    ahal_handle_ = nullptr;
+    if (ahal_handle_) {
+        dlclose(ahal_handle_);
+        ahal_handle_ = nullptr;
+    }
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
