@@ -44,6 +44,16 @@ LOCAL_SHARED_LIBRARIES := \
     libutils \
     libar-pal
 
+ifeq ($(strip $(AUDIO_FEATURE_ENABLED_LSM_HIDL)),true)
+    LOCAL_HEADER_LIBRARIES += liblisten_headers
+
+    LOCAL_SHARED_LIBRARIES += \
+        vendor.qti.hardware.ListenSoundModel@1.0-impl \
+        vendor.qti.hardware.ListenSoundModel@1.0
+
+    LOCAL_CFLAGS += -DLSM_HIDL_ENABLED
+endif
+
 include $(BUILD_SHARED_LIBRARY)
 endif #TARGET_USES_QCOM_MM_AUDIO
 endif #AUDIO_USE_STUB_HAL

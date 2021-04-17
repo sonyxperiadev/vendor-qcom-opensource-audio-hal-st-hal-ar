@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -62,6 +62,21 @@ extern "C" const unsigned int sthal_prop_api_version =
 
 std::shared_ptr<SoundTriggerDevice> SoundTriggerDevice::stdev_ = nullptr;
 std::shared_ptr<sound_trigger_hw_device> SoundTriggerDevice::device_ = nullptr;
+
+#ifdef LSM_HIDL_ENABLED
+#include <hidl/HidlTransportSupport.h>
+#include <hidl/LegacySupport.h>
+
+#include <lsm_server_wrapper.h>
+
+#include <vendor/qti/hardware/ListenSoundModel/1.0/IListenSoundModel.h>
+using vendor::qti::hardware::ListenSoundModel::V1_0::IListenSoundModel;
+using vendor::qti::hardware::ListenSoundModel::V1_0::implementation::ListenSoundModel;
+using android::hardware::defaultPassthroughServiceImplementation;
+using android::sp;
+using namespace android::hardware;
+using android::OK;
+#endif
 
 static int stdev_close(hw_device_t *device)
 {
@@ -446,6 +461,15 @@ int SoundTriggerDevice::Init(hw_device_t **device, const hw_module_t *module)
         ALOGD("%s: returning existing stdev instance, exit", __func__);
         return status;
     }
+
+#ifdef LSM_HIDL_ENABLED
+    /* Register LSM Lib HIDL service */
+    ALOGD("%s: Register LSM HIDL service", __func__);
+    sp<IListenSoundModel> service = new ListenSoundModel();
+    configureRpcThreadpool(32, false /*callerWillJoin*/);
+    if(android::OK !=  service->registerAsService())
+        ALOGW("Could not register LSM HIDL service");
+#endif
 
     // load audio hal
     status = LoadAudioHal();
