@@ -20,7 +20,9 @@ LOCAL_C_INCLUDES += \
     system/media/audio_utils/include \
     external/expat/lib \
     vendor/qcom/opensource/core-utils/fwk-detect \
-    vendor/qcom/opensource/pal
+    vendor/qcom/opensource/pal \
+    vendor/qcom/opensource/audio-hal/primary-hal/hal/audio_extn \
+    vendor/qcom/opensource/audio-hal/primary-hal/hal
 
 LOCAL_SRC_FILES := \
     SoundTriggerDevice.cpp \
