@@ -227,14 +227,14 @@ int SoundTriggerSession::OpenPALStream(pal_stream_type_t stream_type)
     device.config.ch_info.channels = 2;
     device.config.ch_info.ch_map[0] = PAL_CHMAP_CHANNEL_FL;
     device.config.ch_info.ch_map[1] = PAL_CHMAP_CHANNEL_FR;
-    device.config.aud_fmt_id = PAL_AUDIO_FMT_DEFAULT_PCM;
+    device.config.aud_fmt_id = PAL_AUDIO_FMT_PCM_S16_LE;
 
     stream_attributes.type = stream_type;
     stream_attributes.flags = (pal_stream_flags_t)0;
     stream_attributes.direction = PAL_AUDIO_INPUT;
     stream_attributes.in_media_config.sample_rate = 16000;
     stream_attributes.in_media_config.bit_width = 16;
-    stream_attributes.in_media_config.aud_fmt_id = PAL_AUDIO_FMT_DEFAULT_PCM;
+    stream_attributes.in_media_config.aud_fmt_id = PAL_AUDIO_FMT_PCM_S16_LE;
     stream_attributes.in_media_config.ch_info.channels = 1;
     stream_attributes.in_media_config.ch_info.ch_map[0] = PAL_CHMAP_CHANNEL_FL;
 
