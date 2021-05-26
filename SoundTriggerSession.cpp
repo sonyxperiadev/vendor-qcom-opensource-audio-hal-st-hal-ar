@@ -73,8 +73,8 @@ int SoundTriggerSession::pal_callback(
     SoundTriggerSession *session = nullptr;
     struct pal_st_recognition_event *event = nullptr;
     struct sound_trigger_recognition_event *st_event = nullptr;
-    struct sound_trigger_phrase_recognition_event *pharse_event = nullptr;
-    struct pal_st_phrase_recognition_event *pal_pharse_event = nullptr;
+    struct sound_trigger_phrase_recognition_event *phrase_event = nullptr;
+    struct pal_st_phrase_recognition_event *pal_phrase_event = nullptr;
 
     if (!stream_handle || !event_data) {
         status = -EINVAL;
@@ -119,36 +119,36 @@ int SoundTriggerSession::pal_callback(
     } else if (event->type == PAL_SOUND_MODEL_TYPE_KEYPHRASE) {
         size = sizeof(struct sound_trigger_phrase_recognition_event) +
                event->data_size;
-        pharse_event =
+        phrase_event =
             (struct sound_trigger_phrase_recognition_event *)calloc(1, size);
-        if (!pharse_event) {
+        if (!phrase_event) {
             status = -ENOMEM;
             ALOGE("%s: error, failed to allocate recognition event", __func__);
             goto exit;
         }
 
-        st_event = (struct sound_trigger_recognition_event *)pharse_event;
+        st_event = (struct sound_trigger_recognition_event *)phrase_event;
         st_event->data_offset =
             sizeof(struct sound_trigger_phrase_recognition_event);
 
         // copy data only related to phrase event
-        pal_pharse_event = (struct pal_st_phrase_recognition_event *)event;
-        pharse_event->num_phrases = pal_pharse_event->num_phrases;
-        for (i = 0; i < pharse_event->num_phrases; i++) {
-            pharse_event->phrase_extras[i].id =
-                pal_pharse_event->phrase_extras[i].id;
-            pharse_event->phrase_extras[i].recognition_modes =
-                pal_pharse_event->phrase_extras[i].recognition_modes;
-            pharse_event->phrase_extras[i].confidence_level =
-                pal_pharse_event->phrase_extras[i].confidence_level;
-            pharse_event->phrase_extras[i].num_levels =
-                pal_pharse_event->phrase_extras[i].num_levels;
+        pal_phrase_event = (struct pal_st_phrase_recognition_event *)event;
+        phrase_event->num_phrases = pal_phrase_event->num_phrases;
+        for (i = 0; i < phrase_event->num_phrases; i++) {
+            phrase_event->phrase_extras[i].id =
+                pal_phrase_event->phrase_extras[i].id;
+            phrase_event->phrase_extras[i].recognition_modes =
+                pal_phrase_event->phrase_extras[i].recognition_modes;
+            phrase_event->phrase_extras[i].confidence_level =
+                pal_phrase_event->phrase_extras[i].confidence_level;
+            phrase_event->phrase_extras[i].num_levels =
+                pal_phrase_event->phrase_extras[i].num_levels;
 
-            for (j = 0; j < pharse_event->phrase_extras[i].num_levels; j++) {
-                pharse_event->phrase_extras[i].levels[j].user_id =
-                    pal_pharse_event->phrase_extras[i].levels[j].user_id;
-                pharse_event->phrase_extras[i].levels[j].level =
-                    pal_pharse_event->phrase_extras[i].levels[j].level;
+            for (j = 0; j < phrase_event->phrase_extras[i].num_levels; j++) {
+                phrase_event->phrase_extras[i].levels[j].user_id =
+                    pal_phrase_event->phrase_extras[i].levels[j].user_id;
+                phrase_event->phrase_extras[i].levels[j].level =
+                    pal_phrase_event->phrase_extras[i].levels[j].level;
             }
         }
     } else {
@@ -168,7 +168,10 @@ int SoundTriggerSession::pal_callback(
     st_event->trigger_in_data = event->trigger_in_data;
 
     st_event->audio_config.sample_rate = event->media_config.sample_rate;
-    st_event->audio_config.channel_mask = AUDIO_CHANNEL_OUT_FRONT_LEFT;
+    if (event->media_config.ch_info.channels == 1)
+        st_event->audio_config.channel_mask = AUDIO_CHANNEL_IN_MONO;
+    else if (event->media_config.ch_info.channels == 2)
+        st_event->audio_config.channel_mask = AUDIO_CHANNEL_IN_STEREO;
     st_event->audio_config.format = AUDIO_FORMAT_PCM_16_BIT;
 
     st_event->data_size = event->data_size;
@@ -188,8 +191,8 @@ int SoundTriggerSession::pal_callback(
 
 exit:
     // release resources allocated
-    if (pharse_event)
-        free(pharse_event);
+    if (phrase_event)
+        free(phrase_event);
     else if (st_event)
         free(st_event);
     if (lock_status)
