@@ -231,7 +231,10 @@ int SoundTriggerSession::pal_callback(
     session->ses_mutex_.unlock();
     lock_status = false;
     ATRACE_BEGIN("sthal: client detection callback");
-    callback(st_event, session->GetCookie());
+    if (session->state_ == ACTIVE)
+        callback(st_event, session->GetCookie());
+    else
+        ALOGW("%s: skip detection callback as client has stopped", __func__);
     ATRACE_END();
 
 exit:
