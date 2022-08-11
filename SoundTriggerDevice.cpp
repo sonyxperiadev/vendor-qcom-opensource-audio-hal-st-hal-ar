@@ -25,6 +25,10 @@
  * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Changes from Qualcomm Innovation Center are provided under the following license:
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
 #define LOG_TAG "sthal_SoundTriggerDevice"
@@ -466,7 +470,7 @@ int SoundTriggerDevice::Init(hw_device_t **device, const hw_module_t *module)
     /* Register LSM Lib HIDL service */
     ALOGD("%s: Register LSM HIDL service", __func__);
     sp<IListenSoundModel> service = new ListenSoundModel();
-    configureRpcThreadpool(32, false /*callerWillJoin*/);
+    configureRpcThreadpool(48, false /*callerWillJoin*/);
     if(android::OK !=  service->registerAsService())
         ALOGW("Could not register LSM HIDL service");
 #endif
