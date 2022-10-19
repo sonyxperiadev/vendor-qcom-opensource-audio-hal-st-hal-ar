@@ -81,7 +81,7 @@
 SoundTriggerSession::SoundTriggerSession(sound_model_handle_t handle,
                                          audio_hw_call_back_t callback)
 {
-    state_ = IDLE;
+    UpdateState(IDLE);
     sm_handle_ = handle;
     rec_config_payload_ = nullptr;
     rec_config_ = nullptr;
@@ -91,8 +91,9 @@ SoundTriggerSession::SoundTriggerSession(sound_model_handle_t handle,
 
 SoundTriggerSession::~SoundTriggerSession()
 {
-    if (pal_handle_ && state_ != IDLE)
+    if (pal_handle_ && IsState(IDLE))
         pal_stream_close(pal_handle_);
+
     pal_handle_ = nullptr;
 
     if (rec_config_payload_) {
@@ -140,9 +141,9 @@ int SoundTriggerSession::pal_callback(
      */
     do {
         lock_status = session->ses_mutex_.try_lock();
-    } while(!lock_status && (session->state_ == ACTIVE));
+    } while(!lock_status && session->IsState(ACTIVE));
 
-    if (session->state_ != ACTIVE) {
+    if (!session->IsState(ACTIVE)) {
         ALOGW("%s: skip notification as client has stopped", __func__);
         goto exit;
     }
@@ -228,13 +229,10 @@ int SoundTriggerSession::pal_callback(
 
     // callback to SoundTriggerService
     session->GetRecognitionCallback(&callback);
-    session->ses_mutex_.unlock();
-    lock_status = false;
     ATRACE_BEGIN("sthal: client detection callback");
-    if (session->state_ == ACTIVE)
-        callback(st_event, session->GetCookie());
-    else
-        ALOGW("%s: skip detection callback as client has stopped", __func__);
+
+    callback(st_event, session->GetCookie());
+
     ATRACE_END();
 
 exit:
@@ -318,6 +316,7 @@ int SoundTriggerSession::StopRecognition_l()
     int status = 0;
 
     ALOGV("%s: Enter", __func__);
+    UpdateState(STOPPING);
 
     // deregister from audio hal
     RegisterHalEvent(false);
@@ -335,7 +334,7 @@ int SoundTriggerSession::StopRecognition_l()
     }
     rec_config_ = nullptr;
 
-    state_ = STOPPED;
+    UpdateState(STOPPED);
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
@@ -485,7 +484,7 @@ int SoundTriggerSession::LoadSoundModel(
         goto exit;
     }
 
-    state_ = LOADED;
+    UpdateState(LOADED);
 
 exit:
     if (param_payload)
@@ -501,7 +500,7 @@ int SoundTriggerSession::UnloadSoundModel()
 
     ALOGV("%s: Enter", __func__);
     std::lock_guard<std::mutex> lck(ses_mutex_);
-    if (state_ == ACTIVE) {
+    if (IsState(ACTIVE)) {
         status = StopRecognition_l();
         if (status) {
             ALOGE("%s: error, failed to stop recognition, status = %d",
@@ -521,7 +520,7 @@ int SoundTriggerSession::UnloadSoundModel()
     }
     rec_config_ = nullptr;
 
-    state_ = IDLE;
+    UpdateState(IDLE);
 
     ALOGV("%s: Exit, status = %d", __func__, status);
 
@@ -609,7 +608,7 @@ int SoundTriggerSession::StartRecognition(
               __func__, status);
         goto exit;
     }
-    state_ = ACTIVE;
+    UpdateState(ACTIVE);
 
     // register to audio hal
     RegisterHalEvent(true);
@@ -633,23 +632,8 @@ int SoundTriggerSession::StopRecognition()
     ALOGV("%s: Enter", __func__);
     std::lock_guard<std::mutex> lck(ses_mutex_);
 
-    // deregister from audio hal
-    RegisterHalEvent(false);
+    StopRecognition_l();
 
-    // stop pal stream
-    status = pal_stream_stop(pal_handle_);
-    if (status) {
-        ALOGE("%s: error, failed to stop pal stream, status = %d",
-              __func__, status);
-    }
-
-    if (rec_config_payload_) {
-        free(rec_config_payload_);
-        rec_config_payload_ = nullptr;
-    }
-    rec_config_ = nullptr;
-
-    state_ = STOPPED;
     ALOGV("%s: Exit, status = %d", __func__, status);
 
     return status;
@@ -739,4 +723,3 @@ void SoundTriggerSession::GetRecognitionCallback(
 {
     *callback = rec_callback_;
 }
-
