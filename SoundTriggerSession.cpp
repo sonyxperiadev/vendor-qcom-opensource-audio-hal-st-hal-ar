@@ -91,7 +91,7 @@ SoundTriggerSession::SoundTriggerSession(sound_model_handle_t handle,
 
 SoundTriggerSession::~SoundTriggerSession()
 {
-    if (pal_handle_ && IsState(IDLE))
+    if (pal_handle_)
         pal_stream_close(pal_handle_);
 
     pal_handle_ = nullptr;
