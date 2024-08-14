@@ -1,3 +1,4 @@
+ifeq ($(TARGET_USES_AUDIOREACH), true)
 ifneq ($(AUDIO_USE_STUB_HAL), true)
 ifeq ($(TARGET_USES_QCOM_MM_AUDIO),true)
 
@@ -57,3 +58,4 @@ endif
 include $(BUILD_SHARED_LIBRARY)
 endif #TARGET_USES_QCOM_MM_AUDIO
 endif #AUDIO_USE_STUB_HAL
+endif #AUDIO_FRAMEWORK_AUDIOREACH
