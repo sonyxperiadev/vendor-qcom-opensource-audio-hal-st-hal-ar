@@ -21,7 +21,6 @@ LOCAL_MODULE               := sound_trigger.primary.$(TARGET_BOARD_PLATFORM)
 LOCAL_MODULE_TAGS          := optional
 LOCAL_MODULE_OWNER         := qti
 LOCAL_MODULE_RELATIVE_PATH := hw
-LOCAL_MULTILIB             := $(AUDIOSERVER_MULTILIB)
 LOCAL_VENDOR_MODULE        := true
 
 LOCAL_CFLAGS += -Wall -Werror
